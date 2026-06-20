@@ -1,0 +1,6 @@
+backend/uploads/
+node_modules/
+.env
+ai_service/venv/
+ai_service/__pycache__/
+*.csv
