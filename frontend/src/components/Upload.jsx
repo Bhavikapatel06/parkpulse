@@ -129,6 +129,7 @@ export default function Upload({ onUploadSuccess }) {
       // The POST route now returns 202 immediately to avoid HTTP 502/timeouts
       await api.post(`/api/upload?sessionId=${sessionId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 600000, // 10 min timeout for large file uploads
         onUploadProgress: (evt) => {
           if (evt.total) {
             const networkPct = Math.round((evt.loaded * 100) / evt.total);
