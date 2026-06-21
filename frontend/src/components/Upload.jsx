@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 
 const ACCEPTED = ['.csv', '.xlsx', '.xls'];
-const API_BASE = import.meta.env.VITE_API_URL || '';
 
 function generateSessionId() {
   return Math.random().toString(36).substring(2) + Date.now().toString(36);
@@ -22,7 +21,7 @@ export default function Upload({ onUploadSuccess }) {
   const [message, setMessage] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [recordCount, setRecordCount] = useState(null);
-  const eventSourceRef = useRef(null);
+  const pollIntervalRef = useRef(null);
 
   const validateFile = (f) => {
     if (!f) return 'No file selected.';
@@ -62,87 +61,89 @@ export default function Upload({ onUploadSuccess }) {
   const handleDragOver = (e) => { e.preventDefault(); setDragActive(true); };
   const handleDragLeave = () => setDragActive(false);
 
+  const clearPolling = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+  };
+
   const handleUpload = async () => {
     if (!file || status === 'uploading') return;
     setStatus('uploading');
     setProgress(0);
     setInsertedCount(0);
     setTotalCount(0);
-    setProgressLabel('Preparing upload…');
+    setProgressLabel('Uploading file to server…');
     setMessage('');
     setRecordCount(null);
 
     const sessionId = generateSessionId();
 
-    // Open SSE connection for real-time DB progress
-    const sseUrl = `${API_BASE}/api/upload/progress/${sessionId}`;
-    const es = new EventSource(sseUrl);
-    eventSourceRef.current = es;
-
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.status === 'waiting') {
-          setProgress(0);
-          setProgressLabel('Preparing…');
-        } else if (data.status === 'uploading') {
-          setProgress(data.progress || 0);
-          setInsertedCount(data.inserted || 0);
-          setTotalCount(data.total || 0);
-          if (data.total > 0) {
-            setProgressLabel(`Inserting records into database… ${(data.inserted || 0).toLocaleString()} / ${(data.total || 0).toLocaleString()}`);
-          } else {
-            setProgressLabel('Processing file…');
+    // Start polling progress in background
+    const startPolling = () => {
+      clearPolling();
+      pollIntervalRef.current = setInterval(async () => {
+        try {
+          const res = await api.get(`/api/upload/status/${sessionId}`);
+          const data = res.data;
+          if (data.status === 'waiting') {
+            setProgress(0);
+            setProgressLabel('Preparing database…');
+          } else if (data.status === 'uploading') {
+            setProgress(data.progress || 0);
+            setInsertedCount(data.inserted || 0);
+            setTotalCount(data.total || 0);
+            if (data.total > 0) {
+              setProgressLabel(`Inserting records into database… ${(data.inserted || 0).toLocaleString()} / ${(data.total || 0).toLocaleString()}`);
+            } else {
+              setProgressLabel('Processing file…');
+            }
+          } else if (data.status === 'done') {
+            setProgress(100);
+            setProgressLabel('Finalizing…');
+            setStatus('success');
+            setRecordCount(data.inserted || 0);
+            setMessage(`Successfully imported ${(data.inserted || 0).toLocaleString()} records.`);
+            setFile(null);
+            clearPolling();
+            if (onUploadSuccess) {
+              setTimeout(() => onUploadSuccess(), 1800);
+            }
+          } else if (data.status === 'error') {
+            setStatus('error');
+            setMessage(`Upload failed: ${data.errorMsg || 'Unknown error occurred during database insert.'}`);
+            setProgress(0);
+            clearPolling();
           }
-        } else if (data.status === 'done') {
-          setProgress(100);
-          setProgressLabel('Finalizing…');
-          es.close();
-        } else if (data.status === 'error') {
-          es.close();
+        } catch (e) {
+          // Keep polling, ignore temporary network issues during insert
         }
-      } catch (_) {}
-    };
-
-    es.onerror = () => {
-      es.close();
+      }, 1000);
     };
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const res = await api.post(`/api/upload?sessionId=${sessionId}`, formData, {
+      // The POST route now returns 202 immediately to avoid HTTP 502/timeouts
+      await api.post(`/api/upload?sessionId=${sessionId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000, // 10 min timeout for large files
         onUploadProgress: (evt) => {
           if (evt.total) {
-            // While file is being sent over network, show "Transferring…" with partial %
             const networkPct = Math.round((evt.loaded * 100) / evt.total);
             if (networkPct < 100) {
-              setProgress(networkPct > progress ? networkPct : progress);
+              setProgress(Math.floor(networkPct * 0.2)); // map file transfer to 0-20% progress
               setProgressLabel(`Transferring file… ${networkPct}%`);
             }
           }
         },
       });
 
-      es.close();
-      eventSourceRef.current = null;
-
-      const count = res.data.count || 0;
-      setRecordCount(count);
-      setStatus('success');
-      setProgress(100);
-      setMessage(`Successfully imported ${count.toLocaleString()} records.`);
-      setFile(null);
-
-      if (onUploadSuccess) {
-        setTimeout(() => onUploadSuccess(), 1800);
-      }
+      // Start status polling after file transfer request accepted
+      startPolling();
     } catch (err) {
-      es.close();
-      eventSourceRef.current = null;
+      clearPolling();
       setStatus('error');
       const serverError = err.response?.data?.error || err.message;
       setMessage(`Upload failed: ${serverError}`);
@@ -151,10 +152,7 @@ export default function Upload({ onUploadSuccess }) {
   };
 
   const clearFile = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
+    clearPolling();
     setFile(null);
     setStatus('idle');
     setMessage('');
