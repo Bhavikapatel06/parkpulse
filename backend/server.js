@@ -10,8 +10,14 @@ const Violation = require('./models/Violation');
 const xlsx = require('xlsx');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// Allow frontend origin from env; fallback to all origins for local dev
+const allowedOrigin = process.env.FRONTEND_URL || '*';
+app.use(cors({
+    origin: allowedOrigin === '*' ? '*' : [allowedOrigin],
+    credentials: true
+}));
+app.use(express.json({ limit: '10mb' }));
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:5000';
 
@@ -89,9 +95,22 @@ app.put('/api/admin/recommendation-history/:id/status', (req, res) => {
     }
 });
 
-// MongoDB Connection
+// MongoDB Connection with index creation
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/parkpulse')
-    .then(() => console.log('MongoDB Connected'))
+    .then(async () => {
+        console.log('MongoDB Connected');
+        // Create indexes for fast aggregation queries
+        try {
+            await Violation.collection.createIndex({ police_station: 1 });
+            await Violation.collection.createIndex({ created_datetime: -1 });
+            await Violation.collection.createIndex({ vehicle_type: 1 });
+            await Violation.collection.createIndex({ validation_status: 1 });
+            await Violation.collection.createIndex({ police_station: 1, created_datetime: -1 });
+            console.log('MongoDB Indexes created/verified');
+        } catch (indexErr) {
+            console.warn('Index creation warning:', indexErr.message);
+        }
+    })
     .catch(err => console.log('MongoDB Connection Error: ', err));
 
 // Helper for flexible header matching
@@ -507,30 +526,46 @@ app.post('/api/predict', async (req, res) => {
             }
         };
 
-        const aiResponse = await axios.post(`${AI_SERVICE_URL}/api/predict`, payload);
+        const aiResponse = await axios.post(`${AI_SERVICE_URL}/api/predict`, payload, {
+            timeout: 60000 // 60 second timeout for ML training
+        });
         res.json(aiResponse.data);
     } catch (err) {
         console.error("Prediction Proxy Error: ", err.message);
+        // If AI service timed out or is unavailable, return a graceful fallback
+        if (err.code === 'ECONNABORTED' || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
+            return res.status(503).json({
+                error: 'AI service is currently unavailable or initializing. Please try again in a few seconds.',
+                fallback: true
+            });
+        }
         res.status(500).json({ error: err.message });
     }
 });
 
-// CSV Export endpoint
+// CSV Export endpoint — streams via cursor to avoid loading all docs into memory
 app.get('/api/export/csv', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
-        const violations = await Violation.find(filter).lean();
-
-        let csvContent = 'id,latitude,longitude,vehicle_type,violation_type,created_datetime,police_station,junction_name,validation_status\n';
-        violations.forEach(v => {
-            csvContent += `${v._id},${v.latitude},${v.longitude},"${v.vehicle_type || 'Unknown'}","${v.violation_type || 'Unknown'}",${v.created_datetime ? v.created_datetime.toISOString() : ''},"${v.police_station || 'Unknown'}","${v.junction_name || 'Unknown'}","${v.validation_status || 'Pending'}"\n`;
-        });
 
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', 'attachment; filename=violations_export.csv');
-        res.status(200).send(csvContent);
+
+        // Write header
+        res.write('id,latitude,longitude,vehicle_type,violation_type,created_datetime,police_station,junction_name,validation_status\n');
+
+        // Stream rows using cursor — memory efficient for large datasets
+        const cursor = Violation.find(filter).lean().cursor();
+        for await (const v of cursor) {
+            const row = `${v._id},${v.latitude},${v.longitude},"${(v.vehicle_type || 'Unknown').replace(/"/g, '""')}","${(v.violation_type || 'Unknown').replace(/"/g, '""')}",${v.created_datetime ? v.created_datetime.toISOString() : ''},"${(v.police_station || 'Unknown').replace(/"/g, '""')}","${(v.junction_name || 'Unknown').replace(/"/g, '""')}","${v.validation_status || 'Pending'}"\n`;
+            res.write(row);
+        }
+        res.end();
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('CSV Export Error:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: err.message });
+        }
     }
 });
 

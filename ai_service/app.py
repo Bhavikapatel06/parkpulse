@@ -10,6 +10,11 @@ import numpy as np
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for Render deployment."""
+    return jsonify({'status': 'ok', 'service': 'parkpulse-ai'})
+
 @app.route('/api/hotspots', methods=['POST'])
 def detect_hotspots():
     data = request.json
