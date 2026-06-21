@@ -46,12 +46,7 @@ export default function PredictionView({ metadata }) {
     }
   };
 
-  useEffect(() => {
-    if (params.location && params.vehicleType && !hasPredictedOnLoad && !loading) {
-      setHasPredictedOnLoad(true);
-      handlePredict(params);
-    }
-  }, [params.location, params.vehicleType, hasPredictedOnLoad, loading]);
+  // Automatic prediction on load is disabled so the user must click "Predict Risk"
 
   const getRiskColor = (risk) => {
     if (risk > 80) return 'text-red-500 border-red-500/30';

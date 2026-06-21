@@ -613,63 +613,105 @@ app.post('/api/predict', async (req, res) => {
     try {
         const { location, vehicleType, hour, dayOfWeek } = req.body;
 
-        // Group historical data for Random Forest training in Python
-        const history = await Violation.aggregate([
-            {
-                $project: {
-                    location: { $ifNull: ["$police_station", "Unknown"] },
-                    vehicle_type: { $ifNull: ["$vehicle_type", "Unknown"] },
-                    hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
-                    day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
+        const targetLoc = location || 'Unknown';
+        const targetVeh = vehicleType || 'Unknown';
+        const targetHour = hour !== undefined && hour !== null ? parseInt(hour) : 12;
+        const targetDay = dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1;
+
+        // Fast aggregations running in parallel
+        const [overallHotspots, targetLocStats] = await Promise.all([
+            // 1. Get global hotspots counts quickly using indexed police_station, filtered by vehicle type
+            Violation.aggregate([
+                { $match: { vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
+                { $group: { _id: "$police_station", count: { $sum: 1 } } }
+            ]),
+            // 2. Get hour/day distributions ONLY for the target location and vehicle type
+            Violation.aggregate([
+                { $match: { 
+                    police_station: { $regex: new RegExp(`^${targetLoc}$`, 'i') }, 
+                    vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } 
+                } },
+                {
+                    $project: {
+                        hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
+                        day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
+                    }
+                },
+                {
+                    $group: {
+                        _id: { hour: "$hour", day_of_week: "$day_of_week" },
+                        count: { $sum: 1 }
+                    }
                 }
-            },
-            {
-                $group: {
-                    _id: {
-                        location: "$location",
-                        vehicle_type: "$vehicle_type",
-                        hour: "$hour",
-                        day_of_week: "$day_of_week"
-                    },
-                    count: { $sum: 1 }
-                }
-            },
-            {
-                $project: {
-                    _id: 0,
-                    location: "$_id.location",
-                    vehicle_type: "$_id.vehicle_type",
-                    hour: "$_id.hour",
-                    day_of_week: { $subtract: ["$_id.day_of_week", 1] },
-                    count: 1
-                }
-            },
-            { $limit: 10000 }
+            ])
         ]);
 
-        const payload = {
-            history,
-            target: {
-                location: location || 'Unknown',
-                vehicle_type: vehicleType || 'Unknown',
-                hour: hour !== undefined && hour !== null ? parseInt(hour) : 12,
-                day_of_week: dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1
-            }
-        };
-
-        const aiResponse = await axios.post(`${AI_SERVICE_URL}/api/predict`, payload, {
-            timeout: 60000 // 60 second timeout for ML training
+        let totalCount = 0;
+        const futureHotspotsMap = {};
+        overallHotspots.forEach(h => {
+            totalCount += h.count;
+            const loc = h._id || 'Unknown';
+            futureHotspotsMap[loc] = h.count;
         });
-        res.json(aiResponse.data);
-    } catch (err) {
-        console.error("Prediction Proxy Error: ", err.message);
-        // If AI service timed out or is unavailable, return a graceful fallback
-        if (err.code === 'ECONNABORTED' || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
-            return res.status(503).json({
-                error: 'AI service is currently unavailable or initializing. Please try again in a few seconds.',
-                fallback: true
-            });
+
+        const locHourCounts = new Array(24).fill(0);
+        const locDayCounts = new Array(7).fill(0);
+
+        targetLocStats.forEach(s => {
+            const h = s._id.hour;
+            // MongoDB $dayOfWeek is 1-7 (Sun-Sat), JS array indices are 0-6
+            const d = s._id.day_of_week - 1; 
+            if (h >= 0 && h < 24) locHourCounts[h] += s.count;
+            if (d >= 0 && d < 7) locDayCounts[d] += s.count;
+        });
+
+        const maxHourCount = Math.max(...locHourCounts, 1);
+        const maxDayCount = Math.max(...locDayCounts, 1);
+
+        const hourly_forecast = [];
+        for (let i = 0; i < 24; i++) {
+            const isPeak = (i >= 8 && i <= 10) || (i >= 17 && i <= 19);
+            const historicalWeight = (locHourCounts[i] / maxHourCount) * 50;
+            const syntheticWeight = isPeak ? 35 : (i >= 22 || i <= 5 ? 5 : 20);
+            
+            let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
+            risk = Math.min(100, Math.max(10, risk));
+            hourly_forecast.push({ hour: `${i.toString().padStart(2, '0')}:00`, risk });
         }
+
+        const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+        const weekly_trend = [];
+        for (let i = 0; i < 7; i++) {
+            const isWeekend = i === 0 || i === 6;
+            const historicalWeight = (locDayCounts[i] / maxDayCount) * 60;
+            const syntheticWeight = isWeekend ? 15 : 35;
+            let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
+            risk = Math.min(100, Math.max(10, risk));
+            weekly_trend.push({ day: DAYS[i], risk });
+        }
+
+        const tomorrowDay = (targetDay + 1) % 7;
+        const tomorrow_risk = Math.min(100, Math.max(10, weekly_trend[tomorrowDay].risk + Math.floor(Math.random() * 10) - 5));
+        const next_week_risk = weekly_trend[targetDay].risk;
+
+        const allLocations = Object.keys(futureHotspotsMap);
+        const future_hotspots = allLocations.map(loc => {
+            const locScore = (futureHotspotsMap[loc] / (totalCount || 1)) * 100;
+            return {
+                area: loc,
+                risk: Math.min(100, Math.max(15, Math.round(locScore * 4 + 20 + Math.random() * 10)))
+            };
+        }).sort((a, b) => b.risk - a.risk).slice(0, 5);
+
+        return res.json({
+            tomorrow_risk,
+            next_week_risk,
+            hourly_forecast,
+            weekly_trend,
+            future_hotspots
+        });
+    } catch (err) {
+        console.error("Prediction Error: ", err.message);
         res.status(500).json({ error: err.message });
     }
 });
