@@ -66,11 +66,11 @@ app.get('/api/admin/recommendation-history', async (req, res) => {
                 { $limit: 10 }
             ]);
             cachedRecommendations = topAreas.map((area, i) => ({
-                id: `REC-${1042 + i}`,
+                id: `REC-${String(i + 1).padStart(4, '0')}`,
                 timestamp: area.latest || new Date(),
                 location: area._id || 'Unknown',
                 action: area.count > 50 ? 'Deploy 3 Marshals & Camera' : 'Issue Warning Signage',
-                status: i % 3 === 0 ? 'Pending' : 'Executed'
+                status: 'Pending'
             }));
         }
         res.json(cachedRecommendations);
@@ -105,6 +105,7 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/parkpulse')
             await Violation.collection.createIndex({ created_datetime: -1 });
             await Violation.collection.createIndex({ vehicle_type: 1 });
             await Violation.collection.createIndex({ validation_status: 1 });
+            await Violation.collection.createIndex({ violation_type: 1 });
             await Violation.collection.createIndex({ police_station: 1, created_datetime: -1 });
             console.log('MongoDB Indexes created/verified');
         } catch (indexErr) {
@@ -221,7 +222,17 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             }
 
             if (results.length > 0) {
-                await Violation.deleteMany({});
+                // IMPORTANT: Delete BEFORE inserting. If delete fails, abort entirely.
+                try {
+                    await Violation.deleteMany({});
+                    cachedRecommendations = null;
+                } catch (deleteErr) {
+                    console.error('Failed to clear DB before Excel upload:', deleteErr.message);
+                    if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+                    return res.status(500).json({
+                        error: 'Could not clear existing data. Upload aborted to prevent data duplication.'
+                    });
+                }
                 const chunkSize = 5000;
                 for (let i = 0; i < results.length; i += chunkSize) {
                     const chunk = results.slice(i, i + chunkSize);
@@ -240,13 +251,21 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             res.status(500).json({ error: err.message });
         }
     } else {
-        let totalCount = 0;
+        // ── CSV Upload Path ──────────────────────────────────────────────────────
+        // IMPORTANT: Delete BEFORE inserting. If delete fails, abort entirely
+        // so we never append new data on top of stale old data.
         try {
             await Violation.deleteMany({});
+            cachedRecommendations = null;
         } catch (e) {
-            console.error("Failed to clear DB", e);
+            console.error('Failed to clear DB before CSV upload:', e.message);
+            if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            return res.status(500).json({
+                error: 'Could not clear existing data before import. Upload aborted to prevent data duplication.'
+            });
         }
 
+        let totalCount = 0;
         const batchSize = 10000;
         let currentBatch = [];
 
@@ -333,30 +352,62 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 app.get('/api/dashboard', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
-        const total = await Violation.countDocuments(filter);
-        const approved = await Violation.countDocuments({ ...filter, validation_status: 'Approved' });
-        const rejected = await Violation.countDocuments({ ...filter, validation_status: 'Rejected' });
 
-        const topAreaAgg = await Violation.aggregate([
+        // Single aggregation with $facet for all stats in one DB round-trip
+        const statsAgg = await Violation.aggregate([
             { $match: filter },
-            { $group: { _id: "$police_station", count: { $sum: 1 } } },
-            { $sort: { count: -1 } }
+            {
+                $facet: {
+                    byStatus: [
+                        { $group: { _id: '$validation_status', count: { $sum: 1 } } }
+                    ],
+                    byStation: [
+                        { $group: { _id: '$police_station', count: { $sum: 1 } } },
+                        { $sort: { count: -1 } }
+                    ],
+                    total: [
+                        { $count: 'count' }
+                    ]
+                }
+            }
         ]);
-        const highestRiskArea = topAreaAgg.length > 0 && topAreaAgg[0]._id ? topAreaAgg[0]._id : "Unknown";
+
+        const result   = statsAgg[0] || { byStatus: [], byStation: [], total: [] };
+        const byStatus = result.byStatus || [];
+        const byStation = result.byStation || [];
+
+        // $count is the ground truth for the total number of documents
+        const total = result.total[0]?.count ?? 0;
+
+        let approved = 0;
+        let rejected = 0;
+        let pending  = 0;
+
+        byStatus.forEach(({ _id, count }) => {
+            const id = (_id || '').trim().toLowerCase();
+            if (id === 'approved')       approved += (count || 0);
+            else if (id === 'rejected')  rejected += (count || 0);
+            else if (id === 'pending')   pending  += (count || 0);
+            // any other status values (e.g. 'valid', 'invalid', empty) are
+            // silently absorbed into the total — they won't skew the 3 known buckets
+        });
+
+        const highestRiskArea = byStation.length > 0 && byStation[0]._id
+            ? byStation[0]._id
+            : 'Unknown';
 
         let activeHotspots = 0;
         if (total > 0) {
-            topAreaAgg.forEach(group => {
-                if ((group.count / total) * 100 >= 3) {
-                    activeHotspots++;
-                }
+            byStation.forEach(group => {
+                if ((group.count / total) * 100 >= 3) activeHotspots++;
             });
         }
 
         res.json({
-            totalViolations: total,
+            totalViolations:    total,
             approvedViolations: approved,
             rejectedViolations: rejected,
+            pendingViolations:  pending,
             activeHotspots,
             highestRiskArea
         });
@@ -364,6 +415,7 @@ app.get('/api/dashboard', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 
 app.get('/api/heatmap', async (req, res) => {
     try {
@@ -398,16 +450,25 @@ app.get('/api/hotspots', async (req, res) => {
         let idCounter = 1;
 
         hotspotsAgg.forEach(group => {
-            const percentage = (group.count / totalViolations) * 100;
-            if (percentage >= 3) {
+            if (group.count >= 5) {
+                const percentage = (group.count / totalViolations) * 100;
+                let risk_level = 'Low';
+                if (percentage >= 15) {
+                    risk_level = 'Critical';
+                } else if (percentage >= 8) {
+                    risk_level = 'High';
+                } else if (percentage >= 3) {
+                    risk_level = 'Moderate';
+                }
+
                 hotspots.push({
                     id: idCounter++,
                     lat: group.lat,
                     lng: group.lng,
                     count: group.count,
                     area: group._id || 'Unknown',
-                    risk_level: percentage > 50 ? 'Critical' : 'High',
-                    risk_score: Math.min(100, Math.floor(percentage * 2))
+                    risk_level,
+                    risk_score: Math.min(100, Math.max(10, Math.floor(percentage * 4)))
                 });
             }
         });
@@ -521,8 +582,8 @@ app.post('/api/predict', async (req, res) => {
             target: {
                 location: location || 'Unknown',
                 vehicle_type: vehicleType || 'Unknown',
-                hour: parseInt(hour) || 12,
-                day_of_week: parseInt(dayOfWeek) || 1
+                hour: hour !== undefined && hour !== null ? parseInt(hour) : 12,
+                day_of_week: dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1
             }
         };
 

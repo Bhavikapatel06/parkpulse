@@ -16,6 +16,8 @@ export default function PredictionView({ metadata }) {
     dayOfWeek: 1
   });
 
+  const [hasPredictedOnLoad, setHasPredictedOnLoad] = useState(false);
+
   useEffect(() => {
     if (policeStations.length > 0 && (!params.location || !policeStations.includes(params.location))) {
       setParams(p => ({ ...p, location: policeStations[0] }));
@@ -23,25 +25,33 @@ export default function PredictionView({ metadata }) {
     if (vehicleTypes.length > 0 && (!params.vehicleType || !vehicleTypes.includes(params.vehicleType))) {
       setParams(p => ({ ...p, vehicleType: vehicleTypes[0] }));
     }
-  }, [policeStations, vehicleTypes]);
+  }, [policeStations, vehicleTypes, params.location, params.vehicleType]);
 
   const [prediction, setPrediction] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const handlePredict = async () => {
+  const handlePredict = async (activeParams = params) => {
+    if (!activeParams.location || !activeParams.vehicleType) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await api.post('/api/predict', params, { timeout: 90000 });
+      const res = await api.post('/api/predict', activeParams, { timeout: 90000 });
       setPrediction(res.data);
     } catch (err) {
-      const msg = err.response?.data?.error || err.message || 'AI service is currently initializing. Please try again.';
+      const msg = err.response?.data?.error || err.message || 'AI service is currently initializing or cold-starting. Please try again in a few seconds.';
       setError(msg);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (params.location && params.vehicleType && !hasPredictedOnLoad && !loading) {
+      setHasPredictedOnLoad(true);
+      handlePredict(params);
+    }
+  }, [params.location, params.vehicleType, hasPredictedOnLoad, loading]);
 
   const getRiskColor = (risk) => {
     if (risk > 80) return 'text-red-500 border-red-500/30';
@@ -129,7 +139,7 @@ export default function PredictionView({ metadata }) {
 
             <button
               id="predict-risk-btn"
-              onClick={handlePredict}
+              onClick={() => handlePredict(params)}
               disabled={loading || !params.location}
               className="mt-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold py-2.5 px-4 rounded-lg shadow-lg shadow-blue-500/20 transition-colors flex items-center justify-center gap-2"
             >
@@ -168,8 +178,13 @@ export default function PredictionView({ metadata }) {
             <div className="flex-1 min-h-[250px] flex flex-col items-center justify-center gap-4">
               <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
               <div className="text-center">
-                <p className="text-sm font-medium text-white">Training Random Forest model…</p>
-                <p className="text-xs text-slate-500 mt-1">This may take a few seconds on first run.</p>
+                <p className="text-sm font-medium text-white">Analyzing Data & Running Predictions…</p>
+                <p className="text-xs text-slate-400 mt-1.5">
+                  Training a custom Random Forest Regressor on the active dataset.
+                </p>
+                <p className="text-[11px] text-slate-500 mt-1">
+                  (Note: If the AI service is starting up, this might take up to 60s. Subsequent requests are instantaneous)
+                </p>
               </div>
             </div>
           )}

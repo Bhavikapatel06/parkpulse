@@ -1,7 +1,14 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import api from '../lib/api';
-import { AlertTriangle, MapPin, Activity, CheckCircle, XCircle } from 'lucide-react';
+import { AlertTriangle, MapPin, Activity, CheckCircle, XCircle, Clock } from 'lucide-react';
 import { SkeletonStatCard, ErrorBanner } from './SkeletonCard';
+
+/** Format any number with locale-aware thousands separators. */
+function fmt(value) {
+  if (value === undefined || value === null) return '—';
+  if (typeof value === 'string') return value; // e.g. area names
+  return new Intl.NumberFormat('en-IN').format(value);
+}
 
 export default function Dashboard({ filters, uploadKey }) {
   const [stats, setStats] = useState(null);
@@ -32,7 +39,7 @@ export default function Dashboard({ filters, uploadKey }) {
         setError(err.response?.data?.error || err.message || 'Failed to load dashboard data.');
         setLoading(false);
       });
-  }, [filters, uploadKey]); // re-fetch when uploadKey changes
+  }, [filters, uploadKey]); // re-fetch whenever filters change OR a new file is uploaded
 
   useEffect(() => {
     fetchData();
@@ -49,17 +56,43 @@ export default function Dashboard({ filters, uploadKey }) {
         </div>
       )}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-8">
+      {/* Stat Cards — 6-column grid on large screens */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
         {loading ? (
-          Array.from({ length: 5 }).map((_, i) => <SkeletonStatCard key={i} />)
+          Array.from({ length: 6 }).map((_, i) => <SkeletonStatCard key={i} />)
         ) : stats ? (
           <>
-            <StatCard title="Total Violations" value={stats.totalViolations?.toLocaleString()} icon={<Activity className="text-blue-500" />} />
-            <StatCard title="Approved" value={stats.approvedViolations?.toLocaleString()} icon={<CheckCircle className="text-emerald-500" />} />
-            <StatCard title="Rejected" value={stats.rejectedViolations?.toLocaleString()} icon={<XCircle className="text-red-500" />} />
-            <StatCard title="Active Hotspots" value={stats.activeHotspots} icon={<MapPin className="text-amber-500" />} />
-            <StatCard title="Highest Risk Area" value={stats.highestRiskArea} icon={<AlertTriangle className="text-red-500" />} small />
+            <StatCard
+              title="Total Violations"
+              value={fmt(stats.totalViolations)}
+              icon={<Activity className="text-blue-500" />}
+            />
+            <StatCard
+              title="Approved"
+              value={fmt(stats.approvedViolations)}
+              icon={<CheckCircle className="text-emerald-500" />}
+            />
+            <StatCard
+              title="Rejected"
+              value={fmt(stats.rejectedViolations)}
+              icon={<XCircle className="text-red-500" />}
+            />
+            <StatCard
+              title="Pending"
+              value={fmt(stats.pendingViolations)}
+              icon={<Clock className="text-amber-400" />}
+            />
+            <StatCard
+              title="Active Hotspots"
+              value={fmt(stats.activeHotspots)}
+              icon={<MapPin className="text-amber-500" />}
+            />
+            <StatCard
+              title="Highest Risk Area"
+              value={stats.highestRiskArea ?? '—'}
+              icon={<AlertTriangle className="text-red-500" />}
+              isText
+            />
           </>
         ) : null}
       </div>
@@ -99,17 +132,26 @@ export default function Dashboard({ filters, uploadKey }) {
   );
 }
 
-function StatCard({ title, value, icon, small }) {
+/**
+ * StatCard — displays a metric with no text truncation.
+ * Large numbers are formatted; long strings (area names) wrap naturally.
+ * isText = true means the value is a place name, not a number.
+ */
+function StatCard({ title, value, icon, isText = false }) {
   return (
-    <div className="glass-panel p-5 flex items-center justify-between gap-3">
+    <div className="glass-panel p-4 flex items-start justify-between gap-3">
       <div className="flex-1 min-w-0">
-        <p className="text-slate-400 text-xs mb-1 truncate">{title}</p>
-        <h3 className={`font-bold text-white truncate ${small ? 'text-base' : 'text-2xl'}`}>
-          {value ?? '—'}
-        </h3>
+        <p className="text-slate-400 text-xs mb-1">{title}</p>
+        <p
+          className={`font-bold text-white leading-tight ${
+            isText ? 'text-sm break-words' : 'text-xl sm:text-2xl tabular-nums'
+          }`}
+        >
+          {value}
+        </p>
       </div>
-      <div className="p-3 bg-surface rounded-lg flex-shrink-0">
-        {icon}
+      <div className="p-2 bg-surface rounded-lg flex-shrink-0 mt-0.5">
+        {React.cloneElement(icon, { className: `${icon.props.className} w-5 h-5` })}
       </div>
     </div>
   );

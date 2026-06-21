@@ -10,63 +10,67 @@ import numpy as np
 app = Flask(__name__)
 CORS(app)
 
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint for Render deployment."""
     return jsonify({'status': 'ok', 'service': 'parkpulse-ai'})
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hotspot Detection  (DBSCAN clustering on lat/lng points)
+# ──────────────────────────────────────────────────────────────────────────────
 @app.route('/api/hotspots', methods=['POST'])
 def detect_hotspots():
     data = request.json
     if not data or 'locations' not in data:
         return jsonify({'error': 'No locations provided'}), 400
-    
-    locations = data['locations'] # list of dicts: {'lat': float, 'lng': float}
+
+    locations = data['locations']  # list of dicts: {'lat', 'lng', 'area'}
     if not locations:
         return jsonify({'hotspots': []})
-        
+
     df = pd.DataFrame(locations)
-    
-    # DBSCAN clustering
-    # Adjusted for Hackathon MVP: Make parameters more lenient so large, visible clusters always appear
-    eps = 0.005 # ~500 meters
+
+    eps = 0.005        # ~500 m in decimal degrees
     min_samples = 3
-    
-    # Convert lat/lng to radians for haversine metric if needed, 
-    # but for simple approx in city we can use euclidean on lat/lng or just adjust eps.
+
     coords = df[['lat', 'lng']].values
-    
     db = DBSCAN(eps=eps, min_samples=min_samples, metric='euclidean').fit(coords)
-    
     df['cluster'] = db.labels_
-    
-    # -1 means noise (not a hotspot)
+
     hotspots_df = df[df['cluster'] != -1]
-    
+    if hotspots_df.empty:
+        return jsonify({'hotspots': []})
+
+    # Dynamic thresholds based on largest cluster
+    counts = hotspots_df.groupby('cluster').size()
+    max_count = int(counts.max())
+
+    mod_thresh  = max(3,  max_count * 0.30)
+    high_thresh = max(6,  max_count * 0.60)
+    crit_thresh = max(10, max_count * 0.80)
+
     hotspots = []
-    
     for cluster_id, group in hotspots_df.groupby('cluster'):
         center_lat = group['lat'].mean()
         center_lng = group['lng'].mean()
         count = len(group)
-        
-        # Get the most common area name in this cluster
-        top_area = group['area'].mode()[0] if 'area' in group else 'Unknown'
-        
-        # Determine risk level based on count
-        if count < 10:
-            risk_level = "Low"
-            risk_score = count * 2
-        elif count < 30:
-            risk_level = "Moderate"
-            risk_score = count * 2 + 20
-        elif count < 60:
-            risk_level = "High"
-            risk_score = count * 1.5 + 40
+        top_area = group['area'].mode()[0] if 'area' in group.columns else 'Unknown'
+
+        if count < mod_thresh:
+            risk_level = 'Low'
+            risk_score = (count / mod_thresh) * 30
+        elif count < high_thresh:
+            risk_level = 'Moderate'
+            risk_score = 30 + ((count - mod_thresh) / max(1, high_thresh - mod_thresh)) * 30
+        elif count < crit_thresh:
+            risk_level = 'High'
+            risk_score = 60 + ((count - high_thresh) / max(1, crit_thresh - high_thresh)) * 25
         else:
-            risk_level = "Critical"
-            risk_score = min(100, count * 1.2 + 50)
-            
+            risk_level = 'Critical'
+            risk_score = min(100, 85 + ((count - crit_thresh) / max(1, max_count - crit_thresh)) * 15)
+
         hotspots.append({
             'id': int(cluster_id),
             'lat': float(center_lat),
@@ -74,126 +78,173 @@ def detect_hotspots():
             'count': int(count),
             'area': str(top_area),
             'risk_level': risk_level,
-            'risk_score': min(100, int(risk_score))
+            'risk_score': min(100, max(1, int(risk_score)))
         })
-        
-    # Sort by risk score
+
     hotspots.sort(key=lambda x: x['risk_score'], reverse=True)
-        
     return jsonify({'hotspots': hotspots})
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Congestion Prediction  (Random Forest Regressor)
+# ──────────────────────────────────────────────────────────────────────────────
 @app.route('/api/predict', methods=['POST'])
 def predict_congestion():
     from sklearn.ensemble import RandomForestRegressor
-    import pandas as pd
-    # pyrefly: ignore [missing-import]
-    import numpy as np
-    
+
     data = request.json
     if not data or 'history' not in data or 'target' not in data:
         return jsonify({'error': 'History and target are required'}), 400
-        
-    history = data['history']  
-    target = data['target']    
-    
+
+    history = data['history']
+    target  = data['target']
+
+    _empty_hours = [{'hour': f'{h:02d}:00', 'risk': 0} for h in range(24)]
+    _empty_days  = [{'day': d, 'risk': 0} for d in
+                    ['Sunday', 'Monday', 'Tuesday', 'Wednesday',
+                     'Thursday', 'Friday', 'Saturday']]
+
     if not history:
         return jsonify({
-            'tomorrow_risk': 20, 
-            'next_week_risk': 25, 
-            'hourly_forecast': [], 
-            'weekly_trend': [], 
+            'tomorrow_risk': 0,
+            'next_week_risk': 0,
+            'hourly_forecast': _empty_hours,
+            'weekly_trend': _empty_days,
             'future_hotspots': []
         })
-        
-    df = pd.DataFrame(history)
-    
-    try:
-        # Calculate max count for risk normalization
-        max_count = float(df['count'].max()) if len(df) > 0 else 1.0
-        if max_count == 0:
-            max_count = 1.0
-            
-        # Proper encoding: LabelEncoder incorrectly treats locations as ordinal continuous values.
-        # We must use one-hot encoding (get_dummies) for categorical features (location, vehicle_type).
-        X_df = df[['location', 'vehicle_type', 'hour', 'day_of_week']]
-        y = df['count'].values
-        
-        # Convert categoricals into binary columns
-        X_encoded = pd.get_dummies(X_df, columns=['location', 'vehicle_type'])
-        
-        # Train Random Forest Regressor
-        rf = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=15)
-        rf.fit(X_encoded, y)
-        
-        # Helper function to properly format prediction features to match training columns
-        def make_feature(loc, veh, hr, day):
-            row = pd.DataFrame([{'location': loc, 'vehicle_type': veh, 'hour': hr, 'day_of_week': day}])
-            row_encoded = pd.get_dummies(row, columns=['location', 'vehicle_type'])
-            
-            # Add missing columns with 0
-            missing_cols = set(X_encoded.columns) - set(row_encoded.columns)
-            for c in missing_cols:
-                row_encoded[c] = 0
-                
-            # Ensure the exact same column order as training
-            return row_encoded[X_encoded.columns]
 
-        target_loc = target['location']
-        target_veh = target['vehicle_type']
+    df = pd.DataFrame(history)
+
+    try:
+        # ── Features & labels ──────────────────────────────────────────────
+        X_df = df[['location', 'vehicle_type', 'hour', 'day_of_week']]
+        y    = df['count'].values.astype(float)
+
+        X_encoded = pd.get_dummies(X_df, columns=['location', 'vehicle_type'])
+
+        # ── Train ──────────────────────────────────────────────────────────
+        rf = RandomForestRegressor(
+            n_estimators=100,
+            random_state=42,
+            max_depth=12,
+            n_jobs=-1
+        )
+        rf.fit(X_encoded, y)
+
+        target_loc  = target['location']
+        target_veh  = target['vehicle_type']
         target_hour = int(target['hour'])
-        target_day = int(target['day_of_week'])
-        
-        # Predict Tomorrow Risk
+        target_day  = int(target['day_of_week'])
+
+        # ── Build all prediction requests in one batch ─────────────────────
+        pred_requests = []
         tomorrow_day = (target_day + 1) % 7
-        tomorrow_features = make_feature(target_loc, target_veh, target_hour, tomorrow_day)
-        tomorrow_pred = max(0, rf.predict(tomorrow_features)[0])
-        tomorrow_risk = min(100, int((tomorrow_pred / max_count) * 100))
-        
-        # Predict Next Week Risk
-        next_week_features = make_feature(target_loc, target_veh, target_hour, target_day)
-        next_week_pred = max(0, rf.predict(next_week_features)[0])
-        next_week_risk = min(100, int((next_week_pred / max_count) * 100))
-        
-        # 24-Hour Forecast (for target day)
-        hourly_forecast = []
+
+        # idx 0..23:  24-hour forecast for TODAY's day_of_week
         for h in range(24):
-            feat = make_feature(target_loc, target_veh, h, target_day)
-            pred = max(0, rf.predict(feat)[0])
-            risk = min(100, int((pred / max_count) * 100))
-            hourly_forecast.append({'hour': f"{h:02d}:00", 'risk': risk})
-            
-        # 7-Day Risk Trend (for target hour)
-        days_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-        weekly_trend = []
+            pred_requests.append({
+                'location': target_loc, 'vehicle_type': target_veh,
+                'hour': h, 'day_of_week': target_day
+            })
+        # idx 24..47: 24-hour forecast for TOMORROW's day_of_week
+        #  → tomorrow_risk = peak (max) of these 24 predictions
+        for h in range(24):
+            pred_requests.append({
+                'location': target_loc, 'vehicle_type': target_veh,
+                'hour': h, 'day_of_week': tomorrow_day
+            })
+        # idx 48..54: daily peak for each of the 7 days at the target hour
+        #  → next_week_risk = average of these 7 predictions
         for d in range(7):
-            feat = make_feature(target_loc, target_veh, target_hour, d)
-            pred = max(0, rf.predict(feat)[0])
-            risk = min(100, int((pred / max_count) * 100))
-            weekly_trend.append({'day': days_names[d], 'risk': risk})
-            
-        # Future Hotspots (for target vehicle/hour/day)
+            pred_requests.append({
+                'location': target_loc, 'vehicle_type': target_veh,
+                'hour': target_hour, 'day_of_week': d
+            })
+        # idx 55+: future hotspot risk — one row per unique location
         all_locations = df['location'].unique()
-        future_hotspots = []
         for loc in all_locations:
-            feat = make_feature(loc, target_veh, target_hour, target_day)
-            pred = max(0, rf.predict(feat)[0])
-            risk = min(100, int((pred / max_count) * 100))
-            future_hotspots.append({'area': loc, 'risk': risk})
-            
-        future_hotspots.sort(key=lambda x: x['risk'], reverse=True)
-        top_future_hotspots = future_hotspots[:5]
+            pred_requests.append({
+                'location': loc, 'vehicle_type': target_veh,
+                'hour': target_hour, 'day_of_week': target_day
+            })
+
+        pred_df      = pd.DataFrame(pred_requests)
+        pred_encoded = pd.get_dummies(pred_df, columns=['location', 'vehicle_type'])
+
+        # Align to training schema (add missing dummy cols)
+        for col in X_encoded.columns:
+            if col not in pred_encoded.columns:
+                pred_encoded[col] = 0
+        pred_features = pred_encoded[X_encoded.columns]
+
+        # ── Predict ────────────────────────────────────────────────────────
+        preds = np.maximum(rf.predict(pred_features), 0)
+
+        # ── Section slices ─────────────────────────────────────────────────
+        today_preds    = preds[0:24]       # 24 hours for today
+        tomorrow_preds = preds[24:48]      # 24 hours for tomorrow
+        weekly_preds   = preds[48:55]      # 7 days at target hour
+        hs_start       = 55
+        hs_preds       = preds[hs_start:]  # one per location
+
+        # ── Calculate dynamic baseline (95th percentile of target vehicle type counts or global) ──
+        veh_df = df[df['vehicle_type'] == target_veh] if 'vehicle_type' in df.columns else pd.DataFrame()
+        if not veh_df.empty:
+            baseline = float(np.percentile(veh_df['count'].values, 95))
+        else:
+            baseline = float(np.percentile(df['count'].values, 95)) if not df.empty else 10.0
         
+        # Ensure a reasonable minimum baseline to avoid division issues or extreme scaling on small numbers
+        baseline = max(baseline, 5.0)
+
+        # ── Helper to calculate risk index ──
+        def get_risk_index(val: float) -> int:
+            return min(100, max(1, int(round((val / baseline) * 100))))
+
+        # ── Tomorrow risk = PEAK hour across all 24h tomorrow ─────────────
+        tomorrow_risk = get_risk_index(float(tomorrow_preds.max()))
+
+        # ── Next-week risk = average peak across 7 days ───────────────────
+        next_week_risk  = get_risk_index(float(weekly_preds.mean()))
+
+        # ── 24-hour forecast (today) ──────────────────────────────────────
+        hourly_forecast = [
+            {'hour': f'{h:02d}:00',
+             'risk': get_risk_index(float(today_preds[h]))}
+            for h in range(24)
+        ]
+
+        # ── 7-day weekly trend ────────────────────────────────────────────
+        days_names = ['Sunday', 'Monday', 'Tuesday', 'Wednesday',
+                      'Thursday', 'Friday', 'Saturday']
+        weekly_trend = [
+            {'day': days_names[d],
+             'risk': get_risk_index(float(weekly_preds[d]))}
+            for d in range(7)
+        ]
+
+        # ── Future hotspots ───────────────────────────────────────────────
+        future_hotspots = []
+        for idx, loc in enumerate(all_locations):
+            val  = float(hs_preds[idx])
+            risk = get_risk_index(val)
+            future_hotspots.append({'area': loc, 'risk': risk})
+
+        future_hotspots.sort(key=lambda x: x['risk'], reverse=True)
+
         return jsonify({
-            'tomorrow_risk': tomorrow_risk,
-            'next_week_risk': next_week_risk,
+            'tomorrow_risk':   tomorrow_risk,
+            'next_week_risk':  next_week_risk,
             'hourly_forecast': hourly_forecast,
-            'weekly_trend': weekly_trend,
-            'future_hotspots': top_future_hotspots
+            'weekly_trend':    weekly_trend,
+            'future_hotspots': future_hotspots[:5]
         })
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
