@@ -138,7 +138,9 @@ app.put('/api/admin/recommendation-history/:id/status', (req, res) => {
 // MongoDB Connection with index creation
 mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/parkpulse')
     .then(async () => {
-        console.log('MongoDB Connected');
+        const dbName = mongoose.connection.db.databaseName;
+        console.log(`MongoDB Connected to database: ${dbName}`);
+        systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `MongoDB Connected to database: ${dbName}` });
         // Create indexes for fast aggregation queries
         try {
             await Violation.collection.createIndex({ police_station: 1 });
@@ -313,10 +315,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                     await clearAndReclaimDB();
                 } catch (deleteErr) {
                     console.error('Failed to clear DB before Excel upload:', deleteErr.message);
+                    systemLogs.unshift({ timestamp: new Date(), level: 'ERROR', message: `Failed to clear DB before Excel upload: ${deleteErr.message}` });
                     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
                     if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: true, startTime: Date.now() });
                     return res.status(500).json({
-                        error: 'Could not clear existing data. Upload aborted to prevent data duplication.'
+                        error: `Could not clear existing data. Upload aborted to prevent data duplication. Error: ${deleteErr.message}`
                     });
                 }
                 const chunkSize = 5000;
@@ -338,6 +341,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             res.status(200).json({ message: 'Upload successful', count: results.length });
         } catch (err) {
             console.error("Excel Upload Error: ", err);
+            systemLogs.unshift({ timestamp: new Date(), level: 'ERROR', message: `Excel Upload Error: ${err.message}` });
             if (fs.existsSync(req.file.path)) {
                 fs.unlinkSync(req.file.path);
             }
@@ -368,10 +372,11 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             await clearAndReclaimDB();
         } catch (e) {
             console.error('Failed to clear DB before CSV upload:', e.message);
+            systemLogs.unshift({ timestamp: new Date(), level: 'ERROR', message: `Failed to clear DB before CSV upload: ${e.message}` });
             if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: true, startTime: Date.now() });
             return res.status(500).json({
-                error: 'Could not clear existing data before import. Upload aborted to prevent data duplication.'
+                error: `Could not clear existing data before import. Upload aborted to prevent data duplication. Error: ${e.message}`
             });
         }
 
@@ -476,6 +481,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         } catch (err) {
             console.error("CSV Parse/Upload Error: ", err);
+            systemLogs.unshift({ timestamp: new Date(), level: 'ERROR', message: `CSV Parse/Upload Error: ${err.message}` });
             if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             res.status(500).json({ error: err.message });
         }
