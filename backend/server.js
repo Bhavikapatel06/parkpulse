@@ -19,6 +19,14 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
+// Disable caching for all API responses to ensure data reflects deletion/addition immediately on page refresh
+app.use((req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+});
+
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://localhost:5000';
 
 const upload = multer({ dest: 'uploads/' });
