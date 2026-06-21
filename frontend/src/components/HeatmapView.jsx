@@ -9,13 +9,17 @@ const REFRESH_INTERVAL = 30000; // 30 seconds
 
 function MapAutoFit({ hotspots }) {
   const map = useMap();
-  const fitted = useRef(false);
+  const prevHotspotsRef = useRef([]);
 
   useEffect(() => {
-    if (hotspots.length > 0 && !fitted.current) {
-      const bounds = hotspots.map(hs => [hs.lat, hs.lng]);
-      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 });
-      fitted.current = true;
+    if (hotspots.length > 0) {
+      const prevAreas = prevHotspotsRef.current.map(h => h.area).join(',');
+      const currAreas = hotspots.map(h => h.area).join(',');
+      if (prevAreas !== currAreas) {
+        const bounds = hotspots.map(hs => [hs.lat, hs.lng]);
+        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 });
+        prevHotspotsRef.current = hotspots;
+      }
     }
   }, [hotspots, map]);
 
