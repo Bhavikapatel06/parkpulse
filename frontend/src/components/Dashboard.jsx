@@ -56,35 +56,35 @@ export default function Dashboard({ filters, uploadKey }) {
         </div>
       )}
 
-      {/* Stat Cards — 6-column grid on large screens */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
+      {/* Stat Cards — Responsive Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
         {loading ? (
           Array.from({ length: 6 }).map((_, i) => <SkeletonStatCard key={i} />)
         ) : stats ? (
           <>
             <StatCard
               title="Total Violations"
-              value={fmt(stats.totalViolations)}
+              value={stats.totalViolations}
               icon={<Activity className="text-blue-500" />}
             />
             <StatCard
               title="Approved"
-              value={fmt(stats.approvedViolations)}
+              value={stats.approvedViolations}
               icon={<CheckCircle className="text-emerald-500" />}
             />
             <StatCard
               title="Rejected"
-              value={fmt(stats.rejectedViolations)}
+              value={stats.rejectedViolations}
               icon={<XCircle className="text-red-500" />}
             />
             <StatCard
               title="Pending"
-              value={fmt(stats.pendingViolations)}
+              value={stats.pendingViolations}
               icon={<Clock className="text-amber-400" />}
             />
             <StatCard
               title="Active Hotspots"
-              value={fmt(stats.activeHotspots)}
+              value={stats.activeHotspots}
               icon={<MapPin className="text-amber-500" />}
             />
             <StatCard
@@ -138,20 +138,24 @@ export default function Dashboard({ filters, uploadKey }) {
  * isText = true means the value is a place name, not a number.
  */
 function StatCard({ title, value, icon, isText = false }) {
+  const displayValue = isText
+    ? value
+    : (value !== undefined && value !== null && value !== '' ? Number(value).toLocaleString() : '—');
+
   return (
-    <div className="glass-panel p-4 flex items-start justify-between gap-3">
-      <div className="flex-1 min-w-0">
-        <p className="text-slate-400 text-xs mb-1">{title}</p>
+    <div className="glass-panel p-4 flex justify-between items-start gap-3 min-w-0 w-full">
+      <div className="min-w-0 flex-1">
+        <p className="text-slate-400 text-xs mb-1 font-medium">{title}</p>
         <p
           className={`font-bold text-white leading-tight ${
-            isText ? 'text-sm break-words' : 'text-xl sm:text-2xl tabular-nums'
+            isText ? 'text-sm break-words' : 'text-xl sm:text-2xl tabular-nums whitespace-nowrap'
           }`}
         >
-          {value}
+          {displayValue}
         </p>
       </div>
-      <div className="p-2 bg-surface rounded-lg flex-shrink-0 mt-0.5">
-        {React.cloneElement(icon, { className: `${icon.props.className} w-5 h-5` })}
+      <div className="p-2 bg-surface rounded-lg flex-shrink-0">
+        {React.cloneElement(icon, { className: 'w-5 h-5 flex-shrink-0' })}
       </div>
     </div>
   );

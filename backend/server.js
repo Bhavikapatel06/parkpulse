@@ -236,7 +236,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                 const chunkSize = 5000;
                 for (let i = 0; i < results.length; i += chunkSize) {
                     const chunk = results.slice(i, i + chunkSize);
-                    await Violation.insertMany(chunk);
+                    await Violation.collection.insertMany(chunk, { ordered: false });
                 }
             }
             if (fs.existsSync(req.file.path)) {
@@ -319,7 +319,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
                         if (currentBatch.length >= batchSize) {
                             try {
-                                await Violation.insertMany(currentBatch, { ordered: false });
+                                await Violation.collection.insertMany(currentBatch, { ordered: false });
                             } catch (err) {
                                 console.error("Chunk Insert Error:", err.message);
                             }
@@ -332,7 +332,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             // Insert remaining
             if (currentBatch.length > 0) {
                 try {
-                    await Violation.insertMany(currentBatch, { ordered: false });
+                    await Violation.collection.insertMany(currentBatch, { ordered: false });
                 } catch (err) {
                     console.error("Final Chunk Insert Error:", err.message);
                 }
@@ -396,10 +396,56 @@ app.get('/api/dashboard', async (req, res) => {
             ? byStation[0]._id
             : 'Unknown';
 
+        // Calculate active hotspots count using the exact same logic as /api/hotspots
+        const hotspotsFilter = { ...filter };
+        if (hotspotsFilter.validation_status) {
+            delete hotspotsFilter.validation_status;
+        }
+
+        const totalViolationsForHotspots = await Violation.countDocuments(hotspotsFilter);
         let activeHotspots = 0;
-        if (total > 0) {
-            byStation.forEach(group => {
-                if ((group.count / total) * 100 >= 3) activeHotspots++;
+
+        if (totalViolationsForHotspots > 0) {
+            const hotspotsAgg = await Violation.aggregate([
+                { $match: hotspotsFilter },
+                {
+                    $group: {
+                        _id: "$police_station",
+                        count: { $sum: 1 }
+                    }
+                }
+            ]);
+
+            const reqRiskLevel = req.query.riskLevel;
+            hotspotsAgg.forEach(group => {
+                if (group.count >= 5) {
+                    const percentage = (group.count / totalViolationsForHotspots) * 100;
+                    let risk_level = 'Low';
+                    if (percentage >= 15) {
+                        risk_level = 'Critical';
+                    } else if (percentage >= 8) {
+                        risk_level = 'High';
+                    } else if (percentage >= 3) {
+                        risk_level = 'Moderate';
+                    }
+
+                    let matchesRisk = true;
+                    if (reqRiskLevel) {
+                        const searchLevel = reqRiskLevel.toLowerCase();
+                        const hLevel = risk_level.toLowerCase();
+                        if (searchLevel === 'low') {
+                            matchesRisk = (hLevel === 'low');
+                        } else if (searchLevel === 'medium' || searchLevel === 'moderate') {
+                            matchesRisk = (hLevel === 'moderate');
+                        } else if (searchLevel === 'high' || searchLevel === 'critical') {
+                            matchesRisk = (hLevel === 'high' || hLevel === 'critical');
+                        }
+                    }
+
+                    if (matchesRisk) {
+                        activeHotspots++;
+                    }
+                }
             });
         }
 
@@ -430,6 +476,13 @@ app.get('/api/heatmap', async (req, res) => {
 app.get('/api/hotspots', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
+        
+        // Remove raw database validation_status filter if riskLevel is passed,
+        // because riskLevel filters the calculated hotspot risk levels (Low, Moderate, High, Critical)
+        const reqRiskLevel = req.query.riskLevel;
+        if (filter.validation_status) {
+            delete filter.validation_status;
+        }
 
         const totalViolations = await Violation.countDocuments(filter);
         if (totalViolations === 0) return res.json({ hotspots: [] });
@@ -473,10 +526,27 @@ app.get('/api/hotspots', async (req, res) => {
             }
         });
 
-        // Sort by count descending
-        hotspots.sort((a, b) => b.count - a.count);
+        // Filter hotspots based on the calculated risk level
+        let finalHotspots = hotspots;
+        if (reqRiskLevel) {
+            const searchLevel = reqRiskLevel.toLowerCase();
+            finalHotspots = hotspots.filter(h => {
+                const hLevel = h.risk_level.toLowerCase();
+                if (searchLevel === 'low') {
+                    return hLevel === 'low';
+                } else if (searchLevel === 'medium' || searchLevel === 'moderate') {
+                    return hLevel === 'moderate';
+                } else if (searchLevel === 'high' || searchLevel === 'critical') {
+                    return hLevel === 'high' || hLevel === 'critical';
+                }
+                return true;
+            });
+        }
 
-        res.json({ hotspots });
+        // Sort by count descending
+        finalHotspots.sort((a, b) => b.count - a.count);
+
+        res.json({ hotspots: finalHotspots });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
