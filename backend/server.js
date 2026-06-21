@@ -30,6 +30,47 @@ const systemLogs = [
 
 let cachedRecommendations = null;
 
+// Upload progress tracking: sessionId -> { inserted, total, done, error }
+const uploadProgress = new Map();
+// Clean up old sessions after 10 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, data] of uploadProgress.entries()) {
+        if (now - data.startTime > 10 * 60 * 1000) uploadProgress.delete(id);
+    }
+}, 60000);
+
+// SSE endpoint for upload progress
+app.get('/api/upload/progress/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin === '*' ? '*' : allowedOrigin);
+    res.flushHeaders();
+
+    const sendProgress = () => {
+        const data = uploadProgress.get(sessionId);
+        if (!data) {
+            res.write(`data: ${JSON.stringify({ progress: 0, status: 'waiting' })}\n\n`);
+            return;
+        }
+        const progress = data.total > 0 ? Math.min(99, Math.floor((data.inserted / data.total) * 100)) : 0;
+        const payload = { progress, inserted: data.inserted, total: data.total, status: data.done ? 'done' : data.error ? 'error' : 'uploading' };
+        if (data.done) payload.progress = 100;
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        if (data.done || data.error) {
+            clearInterval(timer);
+            res.end();
+        }
+    };
+
+    const timer = setInterval(sendProgress, 300);
+    sendProgress();
+
+    req.on('close', () => clearInterval(timer));
+});
+
 // Simple logging middleware
 app.use((req, res, next) => {
     if (req.method !== 'OPTIONS' && !req.path.includes('/api/admin/logs') && !req.path.includes('/api/heatmap') && !req.path.includes('/api/admin/recommendation-history')) {
@@ -42,8 +83,7 @@ app.use((req, res, next) => {
 // Admin Endpoints
 app.delete('/api/admin/dataset', async (req, res) => {
     try {
-        await Violation.deleteMany({});
-        cachedRecommendations = null; // Reset cache
+        await clearAndReclaimDB();
         systemLogs.unshift({ timestamp: new Date(), level: 'WARN', message: 'Admin permanently wiped violation database' });
         res.json({ message: 'Dataset cleared' });
     } catch (err) {
@@ -114,6 +154,30 @@ mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/parkpulse')
     })
     .catch(err => console.log('MongoDB Connection Error: ', err));
 
+// Helper to drop collection and recreate indexes to reclaim Atlas storage space
+async function clearAndReclaimDB() {
+    try {
+        await Violation.collection.drop();
+    } catch (e) {
+        if (e.code !== 26 && e.message !== 'ns not found') {
+            throw e;
+        }
+    }
+    await Violation.createIndexes();
+    cachedRecommendations = null;
+}
+
+// Find matching key case-insensitively once per file
+function findMatchingKey(data, possibleKeys) {
+    if (!data) return null;
+    const keys = Object.keys(data);
+    for (const possibleKey of possibleKeys) {
+        const match = keys.find(k => k.trim().toLowerCase() === possibleKey.toLowerCase());
+        if (match) return match;
+    }
+    return null;
+}
+
 // Helper for flexible header matching
 function getFieldValue(data, possibleKeys) {
     const keys = Object.keys(data);
@@ -164,57 +228,79 @@ function buildFilterQuery(req) {
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).send('No file uploaded.');
 
+    const sessionId = req.query.sessionId || null;
     const results = [];
     // Only parse as Excel if the file extension is literally .xlsx or .xls (fixes Windows CSV MIME type conflict)
     const isExcel = req.file.originalname.toLowerCase().endsWith('.xlsx') || req.file.originalname.toLowerCase().endsWith('.xls');
 
     if (isExcel) {
+        if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: false, startTime: Date.now() });
         try {
             const workbook = xlsx.readFile(req.file.path);
             const sheetName = workbook.SheetNames[0];
             const worksheet = workbook.Sheets[sheetName];
             const dataRows = xlsx.utils.sheet_to_json(worksheet);
 
+            let headerMapping = null;
             for (const data of dataRows) {
-                const latStr = getFieldValue(data, ['latitude', 'lat', 'lat_deg', 'y']);
-                const lngStr = getFieldValue(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']);
+                if (!headerMapping) {
+                    headerMapping = {
+                        latKey: findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
+                        lngKey: findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
+                        statusKey: findMatchingKey(data, ['validation_status', 'status', 'validation']),
+                        typeKey: findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
+                        vehicleKey: findMatchingKey(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']),
+                        dateKey: findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
+                        stationKey: findMatchingKey(data, ['police_station', 'station', 'area', 'location', 'police']),
+                        junctionKey: findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
+                    };
+                }
+
+                const latStr = headerMapping.latKey ? data[headerMapping.latKey] : '';
+                const lngStr = headerMapping.lngKey ? data[headerMapping.lngKey] : '';
 
                 if (latStr && lngStr) {
                     const latitude = parseFloat(latStr);
                     const longitude = parseFloat(lngStr);
 
                     if (!isNaN(latitude) && !isNaN(longitude)) {
-                        let v_status = getFieldValue(data, ['validation_status', 'status', 'validation']);
-                        if (!v_status || v_status.toLowerCase() === 'null' || v_status === '') {
+                        let v_status = (headerMapping.statusKey ? data[headerMapping.statusKey] : '') || '';
+                        if (typeof v_status === 'string') {
+                            if (!v_status || v_status.toLowerCase() === 'null' || v_status === '') {
+                                v_status = 'Pending';
+                            }
+                            v_status = v_status.charAt(0).toUpperCase() + v_status.slice(1).toLowerCase();
+                        } else if (v_status !== undefined && v_status !== null) {
+                            v_status = v_status.toString();
+                        } else {
                             v_status = 'Pending';
                         }
-                        v_status = v_status.charAt(0).toUpperCase() + v_status.slice(1).toLowerCase();
 
-                        let v_type = getFieldValue(data, ['violation_type', 'violation', 'offence_type', 'offence']) || 'Unknown';
-                        if (v_type.startsWith('[')) {
+                        let v_type = (headerMapping.typeKey ? data[headerMapping.typeKey] : '') || 'Unknown';
+                        if (typeof v_type === 'string' && v_type.startsWith('[')) {
                             try {
                                 const parsed = JSON.parse(v_type);
                                 v_type = parsed[0] || 'Unknown';
                             } catch (e) { }
                         }
 
-                        const vehicle_type = (getFieldValue(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']) || 'Unknown').trim().toUpperCase();
-                        const created_datetime_str = getFieldValue(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']);
-                        const police_station = getFieldValue(data, ['police_station', 'station', 'area', 'location', 'police']) || 'Unknown';
-                        const junction_name = getFieldValue(data, ['junction_name', 'junction', 'crossroad']) || 'Unknown';
+                        const vehicle_type = String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase();
+                        const created_datetime_str = headerMapping.dateKey ? data[headerMapping.dateKey] : '';
+                        const police_station = (headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown';
+                        const junction_name = (headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown';
 
                         results.push({
                             latitude,
                             longitude,
                             vehicle_type,
-                            violation_type: v_type,
+                            violation_type: String(v_type),
                             created_datetime: (() => {
                                 if (!created_datetime_str) return new Date();
                                 const d = new Date(created_datetime_str);
                                 return isNaN(d.getTime()) ? new Date() : d;
                             })(),
-                            police_station,
-                            junction_name,
+                            police_station: String(police_station),
+                            junction_name: String(junction_name),
                             validation_status: v_status
                         });
                     }
@@ -222,22 +308,29 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             }
 
             if (results.length > 0) {
-                // IMPORTANT: Delete BEFORE inserting. If delete fails, abort entirely.
+                // IMPORTANT: Drop collection BEFORE inserting to reclaim physical disk space on MongoDB Atlas.
                 try {
-                    await Violation.deleteMany({});
-                    cachedRecommendations = null;
+                    await clearAndReclaimDB();
                 } catch (deleteErr) {
                     console.error('Failed to clear DB before Excel upload:', deleteErr.message);
                     if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+                    if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: true, startTime: Date.now() });
                     return res.status(500).json({
                         error: 'Could not clear existing data. Upload aborted to prevent data duplication.'
                     });
                 }
                 const chunkSize = 5000;
+                if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: results.length, done: false, error: false, startTime: Date.now() });
+                let inserted = 0;
                 for (let i = 0; i < results.length; i += chunkSize) {
                     const chunk = results.slice(i, i + chunkSize);
                     await Violation.collection.insertMany(chunk, { ordered: false });
+                    inserted += chunk.length;
+                    if (sessionId) uploadProgress.set(sessionId, { inserted, total: results.length, done: false, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
                 }
+                if (sessionId) uploadProgress.set(sessionId, { inserted: results.length, total: results.length, done: true, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
+            } else {
+                if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: true, error: false, startTime: Date.now() });
             }
             if (fs.existsSync(req.file.path)) {
                 fs.unlinkSync(req.file.path);
@@ -254,12 +347,29 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         // ── CSV Upload Path ──────────────────────────────────────────────────────
         // IMPORTANT: Delete BEFORE inserting. If delete fails, abort entirely
         // so we never append new data on top of stale old data.
+        if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: false, startTime: Date.now() });
+
+        // First pass: count newlines rapidly without parser to save CPU and time
+        let estimatedTotal = 0;
         try {
-            await Violation.deleteMany({});
-            cachedRecommendations = null;
+            const countStream = fs.createReadStream(req.file.path);
+            let count = 0;
+            for await (const chunk of countStream) {
+                for (let i = 0; i < chunk.length; i++) {
+                    if (chunk[i] === 10) count++;
+                }
+            }
+            estimatedTotal = count > 0 ? count - 1 : 0;
+        } catch (_) { estimatedTotal = 0; }
+        if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: estimatedTotal, done: false, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
+
+        try {
+            // Drop collection to reclaim Atlas disk space and recreate indexes immediately
+            await clearAndReclaimDB();
         } catch (e) {
             console.error('Failed to clear DB before CSV upload:', e.message);
             if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            if (sessionId) uploadProgress.set(sessionId, { inserted: 0, total: 0, done: false, error: true, startTime: Date.now() });
             return res.status(500).json({
                 error: 'Could not clear existing data before import. Upload aborted to prevent data duplication.'
             });
@@ -271,47 +381,67 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 
         try {
             const parser = fs.createReadStream(req.file.path).pipe(csv());
+            let headerMapping = null;
 
             for await (const data of parser) {
-                const latStr = getFieldValue(data, ['latitude', 'lat', 'lat_deg', 'y']);
-                const lngStr = getFieldValue(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']);
+                if (!headerMapping) {
+                    headerMapping = {
+                        latKey: findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
+                        lngKey: findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
+                        statusKey: findMatchingKey(data, ['validation_status', 'status', 'validation']),
+                        typeKey: findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
+                        vehicleKey: findMatchingKey(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']),
+                        dateKey: findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
+                        stationKey: findMatchingKey(data, ['police_station', 'station', 'area', 'location', 'police']),
+                        junctionKey: findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
+                    };
+                }
+
+                const latStr = headerMapping.latKey ? data[headerMapping.latKey] : '';
+                const lngStr = headerMapping.lngKey ? data[headerMapping.lngKey] : '';
 
                 if (latStr && lngStr) {
                     const latitude = parseFloat(latStr);
                     const longitude = parseFloat(lngStr);
 
                     if (!isNaN(latitude) && !isNaN(longitude)) {
-                        let v_status = getFieldValue(data, ['validation_status', 'status', 'validation']);
-                        if (!v_status || v_status.toLowerCase() === 'null' || v_status === '') {
+                        let v_status = (headerMapping.statusKey ? data[headerMapping.statusKey] : '') || '';
+                        if (typeof v_status === 'string') {
+                            if (!v_status || v_status.toLowerCase() === 'null' || v_status === '') {
+                                v_status = 'Pending';
+                            }
+                            v_status = v_status.charAt(0).toUpperCase() + v_status.slice(1).toLowerCase();
+                        } else if (v_status !== undefined && v_status !== null) {
+                            v_status = v_status.toString();
+                        } else {
                             v_status = 'Pending';
                         }
-                        v_status = v_status.charAt(0).toUpperCase() + v_status.slice(1).toLowerCase();
 
-                        let v_type = getFieldValue(data, ['violation_type', 'violation', 'offence_type', 'offence']) || 'Unknown';
-                        if (v_type.startsWith('[')) {
+                        let v_type = (headerMapping.typeKey ? data[headerMapping.typeKey] : '') || 'Unknown';
+                        if (typeof v_type === 'string' && v_type.startsWith('[')) {
                             try {
                                 const parsed = JSON.parse(v_type);
                                 v_type = parsed[0] || 'Unknown';
                             } catch (e) { }
                         }
 
-                        const vehicle_type = (getFieldValue(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']) || 'Unknown').trim().toUpperCase();
-                        const created_datetime_str = getFieldValue(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']);
-                        const police_station = getFieldValue(data, ['police_station', 'station', 'area', 'location', 'police']) || 'Unknown';
-                        const junction_name = getFieldValue(data, ['junction_name', 'junction', 'crossroad']) || 'Unknown';
+                        const vehicle_type = String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase();
+                        const created_datetime_str = headerMapping.dateKey ? data[headerMapping.dateKey] : '';
+                        const police_station = (headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown';
+                        const junction_name = (headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown';
 
                         currentBatch.push({
                             latitude,
                             longitude,
                             vehicle_type,
-                            violation_type: v_type,
+                            violation_type: String(v_type),
                             created_datetime: (() => {
                                 if (!created_datetime_str) return new Date();
                                 const d = new Date(created_datetime_str);
                                 return isNaN(d.getTime()) ? new Date() : d;
                             })(),
-                            police_station,
-                            junction_name,
+                            police_station: String(police_station),
+                            junction_name: String(junction_name),
                             validation_status: v_status
                         });
 
@@ -320,6 +450,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                         if (currentBatch.length >= batchSize) {
                             try {
                                 await Violation.collection.insertMany(currentBatch, { ordered: false });
+                                if (sessionId) uploadProgress.set(sessionId, { inserted: totalCount, total: estimatedTotal, done: false, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
                             } catch (err) {
                                 console.error("Chunk Insert Error:", err.message);
                             }
@@ -333,11 +464,13 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
             if (currentBatch.length > 0) {
                 try {
                     await Violation.collection.insertMany(currentBatch, { ordered: false });
+                    if (sessionId) uploadProgress.set(sessionId, { inserted: totalCount, total: estimatedTotal, done: false, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
                 } catch (err) {
                     console.error("Final Chunk Insert Error:", err.message);
                 }
             }
 
+            if (sessionId) uploadProgress.set(sessionId, { inserted: totalCount, total: totalCount, done: true, error: false, startTime: uploadProgress.get(sessionId)?.startTime || Date.now() });
             if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
             res.status(200).json({ message: 'Upload successful', count: totalCount });
 

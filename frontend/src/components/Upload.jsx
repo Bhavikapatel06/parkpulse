@@ -1,22 +1,28 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import api from '../lib/api';
 import {
   UploadCloud, CheckCircle, AlertTriangle, FileText, X,
-  TableProperties, FileSpreadsheet, ArrowRight
+  TableProperties, FileSpreadsheet, ArrowRight, Database
 } from 'lucide-react';
 
 const ACCEPTED = ['.csv', '.xlsx', '.xls'];
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
-
-
+function generateSessionId() {
+  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+}
 
 export default function Upload({ onUploadSuccess }) {
   const [file, setFile] = useState(null);
   const [status, setStatus] = useState('idle'); // idle | uploading | success | error
   const [progress, setProgress] = useState(0);
+  const [progressLabel, setProgressLabel] = useState('');
+  const [insertedCount, setInsertedCount] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const [message, setMessage] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [recordCount, setRecordCount] = useState(null);
+  const eventSourceRef = useRef(null);
 
   const validateFile = (f) => {
     if (!f) return 'No file selected.';
@@ -38,6 +44,8 @@ export default function Upload({ onUploadSuccess }) {
     setStatus('idle');
     setMessage('');
     setProgress(0);
+    setInsertedCount(0);
+    setTotalCount(0);
     setRecordCount(null);
   };
 
@@ -58,34 +66,83 @@ export default function Upload({ onUploadSuccess }) {
     if (!file || status === 'uploading') return;
     setStatus('uploading');
     setProgress(0);
+    setInsertedCount(0);
+    setTotalCount(0);
+    setProgressLabel('Preparing upload…');
     setMessage('');
     setRecordCount(null);
+
+    const sessionId = generateSessionId();
+
+    // Open SSE connection for real-time DB progress
+    const sseUrl = `${API_BASE}/api/upload/progress/${sessionId}`;
+    const es = new EventSource(sseUrl);
+    eventSourceRef.current = es;
+
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.status === 'waiting') {
+          setProgress(0);
+          setProgressLabel('Preparing…');
+        } else if (data.status === 'uploading') {
+          setProgress(data.progress || 0);
+          setInsertedCount(data.inserted || 0);
+          setTotalCount(data.total || 0);
+          if (data.total > 0) {
+            setProgressLabel(`Inserting records into database… ${(data.inserted || 0).toLocaleString()} / ${(data.total || 0).toLocaleString()}`);
+          } else {
+            setProgressLabel('Processing file…');
+          }
+        } else if (data.status === 'done') {
+          setProgress(100);
+          setProgressLabel('Finalizing…');
+          es.close();
+        } else if (data.status === 'error') {
+          es.close();
+        }
+      } catch (_) {}
+    };
+
+    es.onerror = () => {
+      es.close();
+    };
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const res = await api.post('/api/upload', formData, {
+      const res = await api.post(`/api/upload?sessionId=${sessionId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 300000, // 5 min timeout for large CSVs
+        timeout: 600000, // 10 min timeout for large files
         onUploadProgress: (evt) => {
           if (evt.total) {
-            setProgress(Math.round((evt.loaded * 100) / evt.total));
+            // While file is being sent over network, show "Transferring…" with partial %
+            const networkPct = Math.round((evt.loaded * 100) / evt.total);
+            if (networkPct < 100) {
+              setProgress(networkPct > progress ? networkPct : progress);
+              setProgressLabel(`Transferring file… ${networkPct}%`);
+            }
           }
         },
       });
+
+      es.close();
+      eventSourceRef.current = null;
+
       const count = res.data.count || 0;
       setRecordCount(count);
       setStatus('success');
+      setProgress(100);
       setMessage(`Successfully imported ${count.toLocaleString()} records.`);
       setFile(null);
-      setProgress(0);
 
-      // Redirect to dashboard after 1.8 seconds
       if (onUploadSuccess) {
         setTimeout(() => onUploadSuccess(), 1800);
       }
     } catch (err) {
+      es.close();
+      eventSourceRef.current = null;
       setStatus('error');
       const serverError = err.response?.data?.error || err.message;
       setMessage(`Upload failed: ${serverError}`);
@@ -94,14 +151,27 @@ export default function Upload({ onUploadSuccess }) {
   };
 
   const clearFile = () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
     setFile(null);
     setStatus('idle');
     setMessage('');
     setProgress(0);
+    setInsertedCount(0);
+    setTotalCount(0);
     setRecordCount(null);
   };
 
   const isExcel = file?.name?.toLowerCase().match(/\.xlsx?$/);
+
+  // Progress bar color based on progress
+  const barColor = progress < 40
+    ? 'from-blue-600 to-blue-400'
+    : progress < 80
+    ? 'from-blue-500 to-emerald-400'
+    : 'from-emerald-600 to-emerald-400';
 
   return (
     <div className="p-4 md:p-6 max-w-3xl mx-auto">
@@ -177,21 +247,28 @@ export default function Upload({ onUploadSuccess }) {
 
         {/* Progress Bar */}
         {status === 'uploading' && (
-          <div>
-            <div className="flex justify-between text-xs text-slate-400 mb-2">
-              <span>{progress < 100 ? 'Transferring file…' : 'Processing records in database…'}</span>
-              <span className="font-mono">{progress}%</span>
+          <div className="glass-panel p-4 rounded-xl">
+            <div className="flex justify-between items-center text-xs text-slate-400 mb-2.5">
+              <span className="flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-blue-400" />
+                {progressLabel || 'Processing…'}
+              </span>
+              <span className="font-mono font-bold text-white tabular-nums">{progress}%</span>
             </div>
-            <div className="w-full bg-slate-700/50 rounded-full h-2 overflow-hidden">
+            <div className="w-full bg-slate-700/50 rounded-full h-3 overflow-hidden">
               <div
-                className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-blue-400 transition-all duration-300 ease-out"
+                className={`h-3 rounded-full bg-gradient-to-r ${barColor} transition-all duration-500 ease-out relative overflow-hidden`}
                 style={{ width: `${progress}%` }}
-              />
+              >
+                {/* Shimmer effect */}
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-pulse" />
+              </div>
             </div>
-            {progress >= 100 && (
-              <p className="text-xs text-slate-500 mt-2 text-center animate-pulse">
-                Inserting records into MongoDB — please wait…
-              </p>
+            {totalCount > 0 && (
+              <div className="flex justify-between mt-2 text-xs text-slate-500">
+                <span>{insertedCount.toLocaleString()} records inserted</span>
+                <span>{totalCount.toLocaleString()} total</span>
+              </div>
             )}
           </div>
         )}
