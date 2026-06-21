@@ -65,32 +65,38 @@ export default function Dashboard({ filters, uploadKey }) {
             <StatCard
               title="Total Violations"
               value={stats.totalViolations}
-              icon={<Activity className="text-blue-500" />}
+              icon={<Activity />}
+              color="blue"
             />
             <StatCard
               title="Approved"
               value={stats.approvedViolations}
-              icon={<CheckCircle className="text-emerald-500" />}
+              icon={<CheckCircle />}
+              color="green"
             />
             <StatCard
               title="Rejected"
               value={stats.rejectedViolations}
-              icon={<XCircle className="text-red-500" />}
+              icon={<XCircle />}
+              color="red"
             />
             <StatCard
               title="Pending"
               value={stats.pendingViolations}
-              icon={<Clock className="text-amber-400" />}
+              icon={<Clock />}
+              color="yellow"
             />
             <StatCard
               title="Active Hotspots"
               value={stats.activeHotspots}
-              icon={<MapPin className="text-amber-500" />}
+              icon={<MapPin />}
+              color="orange"
             />
             <StatCard
               title="Highest Risk Area"
               value={stats.highestRiskArea ?? '—'}
-              icon={<AlertTriangle className="text-red-500" />}
+              icon={<AlertTriangle />}
+              color="red"
               isText
             />
           </>
@@ -133,29 +139,48 @@ export default function Dashboard({ filters, uploadKey }) {
 }
 
 /**
- * StatCard — displays a metric with no text truncation.
- * Large numbers are formatted; long strings (area names) wrap naturally.
- * isText = true means the value is a place name, not a number.
+ * Color themes for each card type.
+ * Each maps to: icon color, icon bg, left border accent, value text color.
  */
-function StatCard({ title, value, icon, isText = false }) {
+const COLOR_THEMES = {
+  blue:   { icon: 'text-blue-400',   bg: 'bg-blue-500/15 border border-blue-500/30',   value: 'text-blue-300' },
+  green:  { icon: 'text-emerald-400', bg: 'bg-emerald-500/15 border border-emerald-500/30', value: 'text-emerald-300' },
+  red:    { icon: 'text-red-400',     bg: 'bg-red-500/15 border border-red-500/30',     value: 'text-red-300' },
+  yellow: { icon: 'text-amber-400',   bg: 'bg-amber-500/15 border border-amber-500/30', value: 'text-amber-300' },
+  orange: { icon: 'text-orange-400',  bg: 'bg-orange-500/15 border border-orange-500/30', value: 'text-orange-300' },
+};
+
+/**
+ * StatCard — displays a metric. Numbers are never truncated.
+ * isText = true for area names (wraps naturally).
+ */
+function StatCard({ title, value, icon, color = 'blue', isText = false }) {
+  const theme = COLOR_THEMES[color] || COLOR_THEMES.blue;
+
   const displayValue = isText
-    ? value
-    : (value !== undefined && value !== null && value !== '' ? Number(value).toLocaleString() : '—');
+    ? (value || '—')
+    : (value !== undefined && value !== null && value !== ''
+        ? Number(value).toLocaleString()
+        : '—');
 
   return (
-    <div className="glass-panel p-4 flex justify-between items-start gap-3 min-w-0 w-full">
-      <div className="min-w-0 flex-1">
-        <p className="text-slate-400 text-xs mb-1 font-medium">{title}</p>
+    <div className="glass-panel p-4 flex flex-col gap-3 min-w-0 w-full">
+      {/* Top row: icon badge */}
+      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${theme.bg}`}>
+        {React.cloneElement(icon, { className: `w-5 h-5 ${theme.icon}` })}
+      </div>
+      {/* Bottom row: label + value */}
+      <div className="min-w-0">
+        <p className="text-slate-400 text-xs font-medium mb-1">{title}</p>
         <p
-          className={`font-bold text-white leading-tight ${
-            isText ? 'text-sm break-words' : 'text-xl sm:text-2xl tabular-nums whitespace-nowrap'
+          className={`font-bold leading-tight ${
+            isText
+              ? 'text-sm text-white break-words'
+              : `text-2xl ${theme.value} tabular-nums`
           }`}
         >
           {displayValue}
         </p>
-      </div>
-      <div className="p-2 bg-surface rounded-lg flex-shrink-0">
-        {React.cloneElement(icon, { className: 'w-5 h-5 flex-shrink-0' })}
       </div>
     </div>
   );
