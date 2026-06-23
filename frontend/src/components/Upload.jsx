@@ -1,8 +1,9 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import api from '../lib/api';
+import { io } from 'socket.io-client';
 import {
   UploadCloud, CheckCircle, AlertTriangle, FileText, X,
-  TableProperties, FileSpreadsheet, ArrowRight, Database
+  TableProperties, FileSpreadsheet, ArrowRight, Database, Search, ChevronLeft, ChevronRight, Trash2
 } from 'lucide-react';
 
 const ACCEPTED = ['.csv', '.xlsx', '.xls'];
@@ -21,7 +22,83 @@ export default function Upload({ onUploadSuccess }) {
   const [message, setMessage] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [recordCount, setRecordCount] = useState(null);
-  const pollIntervalRef = useRef(null);
+  
+  // Data view state
+  const [viewMode, setViewMode] = useState('loading'); // loading | upload | data
+  const [dataRecords, setDataRecords] = useState([]);
+  const [dbTotalRecords, setDbTotalRecords] = useState(0);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [search, setSearch] = useState('');
+
+  const socketRef = useRef(null);
+
+  const fetchViolations = async (currentPage = 1, currentSearch = '') => {
+    try {
+      const res = await api.get(`/api/violations?page=${currentPage}&limit=10&search=${currentSearch}`);
+      const { records, totalRecords, totalPages } = res.data;
+      setDbTotalRecords(totalRecords);
+      setDataRecords(records);
+      setTotalPages(totalPages);
+      setPage(currentPage);
+      
+      if (totalRecords > 0) {
+        setViewMode('data');
+      } else {
+        setViewMode('upload');
+      }
+    } catch (err) {
+      console.error('Failed to fetch records', err);
+      setViewMode('upload');
+    }
+  };
+
+  useEffect(() => {
+    // Initial fetch
+    fetchViolations(page, search);
+
+    // Setup Socket.IO
+    // Get base URL from api config or default to window location
+    const baseURL = api.defaults.baseURL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
+    socketRef.current = io(baseURL);
+
+    socketRef.current.on('data_updated', () => {
+      fetchViolations(1, search);
+      if (onUploadSuccess) onUploadSuccess();
+    });
+
+    socketRef.current.on('data_deleted', () => {
+      setDbTotalRecords(0);
+      setDataRecords([]);
+      setViewMode('upload');
+      if (onUploadSuccess) onUploadSuccess();
+    });
+
+    socketRef.current.on('upload_progress', (data) => {
+      // If someone else is uploading or we are uploading
+      setViewMode('upload');
+      setStatus('uploading');
+      setProgress(Math.floor((data.inserted / (data.total || 1)) * 100));
+      setInsertedCount(data.inserted);
+      setTotalCount(data.total);
+      setProgressLabel(`Inserting records... ${data.inserted.toLocaleString()} / ${data.total.toLocaleString()}`);
+    });
+
+    return () => {
+      if (socketRef.current) socketRef.current.disconnect();
+    };
+  }, []);
+
+  const handleSearchChange = (e) => {
+    setSearch(e.target.value);
+    fetchViolations(1, e.target.value);
+  };
+
+  const handlePageChange = (newPage) => {
+    if (newPage > 0 && newPage <= totalPages) {
+      fetchViolations(newPage, search);
+    }
+  };
 
   const validateFile = (f) => {
     if (!f) return 'No file selected.';
@@ -61,13 +138,6 @@ export default function Upload({ onUploadSuccess }) {
   const handleDragOver = (e) => { e.preventDefault(); setDragActive(true); };
   const handleDragLeave = () => setDragActive(false);
 
-  const clearPolling = () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-  };
-
   const handleUpload = async () => {
     if (!file || status === 'uploading') return;
     setStatus('uploading');
@@ -80,56 +150,13 @@ export default function Upload({ onUploadSuccess }) {
 
     const sessionId = generateSessionId();
 
-    // Start polling progress in background
-    const startPolling = () => {
-      clearPolling();
-      pollIntervalRef.current = setInterval(async () => {
-        try {
-          const res = await api.get(`/api/upload/status/${sessionId}`);
-          const data = res.data;
-          if (data.status === 'waiting') {
-            setProgress(0);
-            setProgressLabel('Preparing database…');
-          } else if (data.status === 'uploading') {
-            setProgress(data.progress || 0);
-            setInsertedCount(data.inserted || 0);
-            setTotalCount(data.total || 0);
-            if (data.total > 0) {
-              setProgressLabel(`Inserting records into database… ${(data.inserted || 0).toLocaleString()} / ${(data.total || 0).toLocaleString()}`);
-            } else {
-              setProgressLabel('Processing file…');
-            }
-          } else if (data.status === 'done') {
-            setProgress(100);
-            setProgressLabel('Finalizing…');
-            setStatus('success');
-            setRecordCount(data.inserted || 0);
-            setMessage(`Successfully imported ${(data.inserted || 0).toLocaleString()} records.`);
-            setFile(null);
-            clearPolling();
-            if (onUploadSuccess) {
-              setTimeout(() => onUploadSuccess(), 1800);
-            }
-          } else if (data.status === 'error') {
-            setStatus('error');
-            setMessage(`Upload failed: ${data.errorMsg || 'Unknown error occurred during database insert.'}`);
-            setProgress(0);
-            clearPolling();
-          }
-        } catch (e) {
-          // Keep polling, ignore temporary network issues during insert
-        }
-      }, 1000);
-    };
-
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      // The POST route now returns 202 immediately to avoid HTTP 502/timeouts
       await api.post(`/api/upload?sessionId=${sessionId}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 600000, // 10 min timeout for large file uploads
+        timeout: 600000,
         onUploadProgress: (evt) => {
           if (evt.total) {
             const networkPct = Math.round((evt.loaded * 100) / evt.total);
@@ -140,11 +167,8 @@ export default function Upload({ onUploadSuccess }) {
           }
         },
       });
-
-      // Start status polling after file transfer request accepted
-      startPolling();
+      // Progress is now handled by Socket.IO
     } catch (err) {
-      clearPolling();
       setStatus('error');
       const serverError = err.response?.data?.error || err.message;
       setMessage(`Upload failed: ${serverError}`);
@@ -153,7 +177,6 @@ export default function Upload({ onUploadSuccess }) {
   };
 
   const clearFile = () => {
-    clearPolling();
     setFile(null);
     setStatus('idle');
     setMessage('');
@@ -165,15 +188,138 @@ export default function Upload({ onUploadSuccess }) {
 
   const isExcel = file?.name?.toLowerCase().match(/\.xlsx?$/);
 
-  // Progress bar color based on progress
   const barColor = progress < 40
     ? 'from-blue-600 to-blue-400'
     : progress < 80
     ? 'from-blue-500 to-emerald-400'
     : 'from-emerald-600 to-emerald-400';
 
+  if (viewMode === 'loading') {
+    return (
+      <div className="p-4 md:p-6 max-w-6xl mx-auto flex justify-center items-center h-64">
+        <div className="flex flex-col items-center gap-3 text-blue-400">
+          <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm font-semibold">Loading data state...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (viewMode === 'data') {
+    return (
+      <div className="p-4 md:p-6 max-w-6xl mx-auto">
+        <div className="glass-panel p-6 mb-6 bg-emerald-500/10 border-emerald-500/30 flex items-center gap-4">
+          <CheckCircle className="w-8 h-8 text-emerald-400 flex-shrink-0" />
+          <div>
+            <h2 className="text-lg font-bold text-emerald-400">Data already exists. No need to upload again.</h2>
+            <p className="text-sm text-emerald-500/80">Total Records: {dbTotalRecords.toLocaleString()}</p>
+          </div>
+          <div className="ml-auto">
+             <button
+               onClick={() => setViewMode('upload')}
+               className="px-4 py-2 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded-lg text-sm font-semibold transition-colors"
+             >
+               Force New Upload
+             </button>
+          </div>
+        </div>
+
+        <div className="glass-panel p-6 rounded-2xl">
+          <div className="flex justify-between items-center mb-6">
+            <h3 className="text-xl font-bold text-white flex items-center gap-2">
+              <Database className="w-5 h-5 text-blue-400" />
+              Live Dataset View
+            </h3>
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search station, vehicle..."
+                value={search}
+                onChange={handleSearchChange}
+                className="bg-slate-800/50 border border-slate-700 text-white pl-9 pr-4 py-2 rounded-lg text-sm focus:outline-none focus:border-blue-500 transition-colors w-64"
+              />
+            </div>
+          </div>
+
+          <div className="overflow-x-auto rounded-xl border border-slate-700">
+            <table className="w-full text-sm text-left">
+              <thead className="bg-slate-800/80 text-slate-300 text-xs uppercase">
+                <tr>
+                  <th className="px-4 py-3">Date</th>
+                  <th className="px-4 py-3">Location</th>
+                  <th className="px-4 py-3">Vehicle</th>
+                  <th className="px-4 py-3">Violation</th>
+                  <th className="px-4 py-3">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-700/50">
+                {dataRecords.length > 0 ? dataRecords.map(record => (
+                  <tr key={record._id} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-4 py-3 text-slate-300 whitespace-nowrap">
+                      {new Date(record.created_datetime).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-3 text-white font-medium">
+                      {record.police_station || 'Unknown'}
+                    </td>
+                    <td className="px-4 py-3 text-slate-300">
+                      {record.vehicle_type || 'Unknown'}
+                    </td>
+                    <td className="px-4 py-3 text-slate-300">
+                      {record.violation_type || 'Unknown'}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                        record.validation_status?.toLowerCase() === 'approved' ? 'bg-emerald-500/20 text-emerald-400' :
+                        record.validation_status?.toLowerCase() === 'rejected' ? 'bg-red-500/20 text-red-400' :
+                        'bg-amber-500/20 text-amber-400'
+                      }`}>
+                        {record.validation_status || 'Pending'}
+                      </span>
+                    </td>
+                  </tr>
+                )) : (
+                  <tr>
+                    <td colSpan="5" className="px-4 py-8 text-center text-slate-500">
+                      No records found matching "{search}"
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between mt-6">
+              <span className="text-sm text-slate-400">
+                Page <span className="font-semibold text-white">{page}</span> of <span className="font-semibold text-white">{totalPages}</span>
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handlePageChange(page - 1)}
+                  disabled={page === 1}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg border border-slate-700 text-slate-300 transition-colors"
+                >
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => handlePageChange(page + 1)}
+                  disabled={page === totalPages}
+                  className="p-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg border border-slate-700 text-slate-300 transition-colors"
+                >
+                  <ChevronRight className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-4 md:p-6 max-w-3xl mx-auto">
+      {/* Existing Upload UI structure, wrapped nicely */}
       <div className="flex items-center gap-3 mb-2">
         <div className="p-2 bg-blue-500/10 rounded-lg border border-blue-500/20">
           <UploadCloud className="w-6 h-6 text-blue-400" />
@@ -185,7 +331,6 @@ export default function Upload({ onUploadSuccess }) {
       </div>
 
       <div className="mt-6 space-y-5">
-        {/* Drop Zone */}
         <div
           className={`glass-panel p-10 flex flex-col items-center justify-center border-2 border-dashed transition-all cursor-pointer relative rounded-2xl ${
             dragActive
@@ -244,7 +389,6 @@ export default function Upload({ onUploadSuccess }) {
           )}
         </div>
 
-        {/* Progress Bar */}
         {status === 'uploading' && (
           <div className="glass-panel p-4 rounded-xl">
             <div className="flex justify-between items-center text-xs text-slate-400 mb-2.5">
@@ -259,7 +403,6 @@ export default function Upload({ onUploadSuccess }) {
                 className={`h-3 rounded-full bg-gradient-to-r ${barColor} transition-all duration-500 ease-out relative overflow-hidden`}
                 style={{ width: `${progress}%` }}
               >
-                {/* Shimmer effect */}
                 <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-pulse" />
               </div>
             </div>
@@ -272,7 +415,6 @@ export default function Upload({ onUploadSuccess }) {
           </div>
         )}
 
-        {/* Action Button */}
         <div className="flex flex-col sm:flex-row justify-end gap-3">
           {file && status !== 'uploading' && (
             <button
@@ -302,7 +444,6 @@ export default function Upload({ onUploadSuccess }) {
           </button>
         </div>
 
-        {/* Success Message */}
         {status === 'success' && (
           <div className="p-5 bg-emerald-500/10 border border-emerald-500/40 text-emerald-400 rounded-xl flex items-start gap-3">
             <CheckCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
@@ -311,16 +452,10 @@ export default function Upload({ onUploadSuccess }) {
               <p className="text-xs text-emerald-500/70 mt-1">
                 Dashboard, heatmap, and analytics are being refreshed…
               </p>
-              <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-emerald-400">
-                <div className="w-3 h-3 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-                Redirecting to Command Center
-                <ArrowRight className="w-3 h-3" />
-              </div>
             </div>
           </div>
         )}
 
-        {/* Error Message */}
         {status === 'error' && (
           <div className="p-4 bg-red-500/10 border border-red-500/40 text-red-400 rounded-xl flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
