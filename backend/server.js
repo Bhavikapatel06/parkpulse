@@ -6,10 +6,20 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const axios = require('axios');
+const http = require('http');
+const { Server } = require('socket.io');
 const Violation = require('./models/Violation');
 const xlsx = require('xlsx');
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: process.env.FRONTEND_URL || '*',
+        methods: ["GET", "POST", "PUT", "DELETE"],
+        credentials: true
+    }
+});
 
 // Allow frontend origin from env; fallback to all origins for local dev
 const allowedOrigin = process.env.FRONTEND_URL || '*';
@@ -82,6 +92,7 @@ app.delete('/api/admin/dataset', async (req, res) => {
     try {
         await clearAndReclaimDB();
         systemLogs.unshift({ timestamp: new Date(), level: 'WARN', message: 'Admin permanently wiped violation database' });
+        io.emit('data_deleted');
         res.json({ message: 'Dataset cleared' });
     } catch (err) {
         systemLogs.unshift({ timestamp: new Date(), level: 'ERROR', message: `Database wipe failed: ${err.message}` });
@@ -353,8 +364,10 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                     await Violation.collection.insertMany(results.slice(i, i + chunkSize), { ordered: false });
                     inserted += Math.min(chunkSize, results.length - i);
                     if (sessionId) { const s = uploadSessions.get(sessionId); if (s) { s.inserted = inserted; } }
+                    io.emit('upload_progress', { sessionId, inserted, total: results.length });
                 }
                 if (sessionId) { const s = uploadSessions.get(sessionId); if (s) { s.inserted = results.length; s.total = results.length; s.done = true; } }
+                io.emit('data_updated');
                 systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `Excel upload complete: ${results.length} records inserted` });
 
             } else {
@@ -433,6 +446,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                         } catch (e) { console.error('Batch insert error:', e.message); }
                         currentBatch = [];
                         if (sessionId) { const s = uploadSessions.get(sessionId); if (s) s.inserted = totalCount; }
+                        io.emit('upload_progress', { sessionId, inserted: totalCount, total: estimatedTotal });
                     }
                 }
 
@@ -444,6 +458,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                 }
 
                 if (sessionId) { const s = uploadSessions.get(sessionId); if (s) { s.inserted = totalCount; s.total = totalCount; s.done = true; } }
+                io.emit('data_updated');
                 systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `CSV upload complete: ${totalCount} records inserted` });
             }
 
@@ -455,6 +470,42 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
             if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         }
     })();
+});
+
+app.get('/api/violations', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+        const search = req.query.search || '';
+        const skip = (page - 1) * limit;
+
+        const filter = buildFilterQuery(req);
+        
+        if (search) {
+            filter.$or = [
+                { police_station: { $regex: search, $options: 'i' } },
+                { vehicle_type: { $regex: search, $options: 'i' } },
+                { violation_type: { $regex: search, $options: 'i' } },
+                { validation_status: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const totalRecords = await Violation.countDocuments(filter);
+        const records = await Violation.find(filter)
+            .sort({ created_datetime: -1 })
+            .skip(skip)
+            .limit(limit)
+            .lean();
+
+        res.json({
+            records,
+            totalRecords,
+            totalPages: Math.ceil(totalRecords / limit),
+            currentPage: page
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/dashboard', async (req, res) => {
@@ -539,53 +590,79 @@ app.get('/api/heatmap', async (req, res) => {
 app.get('/api/hotspots', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
-        const reqRiskLevel = req.query.riskLevel;
         if (filter.validation_status) delete filter.validation_status;
 
-        const totalViolations = await Violation.countDocuments(filter);
-        if (totalViolations === 0) return res.json({ hotspots: [] });
+        // Try calling the Python AI Service first for advanced DBSCAN clustering
+        try {
+            const locations = await Violation.find(filter, 'latitude longitude police_station').lean();
+            const locationsData = locations.map(l => ({ lat: l.latitude, lng: l.longitude, area: l.police_station || 'Unknown' }));
+            
+            const aiRes = await axios.post(`${AI_SERVICE_URL}/api/hotspots`, { locations: locationsData }, { timeout: 30000 });
+            let finalHotspots = aiRes.data.hotspots || [];
 
-        const hotspotsAgg = await Violation.aggregate([
-            { $match: filter },
-            { $group: { _id: "$police_station", count: { $sum: 1 }, lat: { $avg: "$latitude" }, lng: { $avg: "$longitude" } } }
-        ]);
-
-        const hotspots = [];
-        let idCounter = 1;
-        hotspotsAgg.forEach(group => {
-            if (group.count >= 5) {
-                const percentage = (group.count / totalViolations) * 100;
-                let risk_level = 'Low';
-                if (percentage >= 15) risk_level = 'Critical';
-                else if (percentage >= 8) risk_level = 'High';
-                else if (percentage >= 3) risk_level = 'Moderate';
-
-                hotspots.push({
-                    id: idCounter++,
-                    lat: group.lat,
-                    lng: group.lng,
-                    count: group.count,
-                    area: group._id || 'Unknown',
-                    risk_level,
-                    risk_score: Math.min(100, Math.max(10, Math.floor(percentage * 4)))
+            // Filter by risk level if requested
+            const reqRiskLevel = req.query.riskLevel;
+            if (reqRiskLevel) {
+                const sl = reqRiskLevel.toLowerCase();
+                finalHotspots = finalHotspots.filter(h => {
+                    const hl = (h.risk_level || '').toLowerCase();
+                    if (sl === 'low') return hl === 'low';
+                    if (sl === 'medium' || sl === 'moderate') return hl === 'moderate';
+                    if (sl === 'high' || sl === 'critical') return hl === 'high' || hl === 'critical';
+                    return true;
                 });
             }
-        });
+            return res.json({ hotspots: finalHotspots });
 
-        let finalHotspots = hotspots;
-        if (reqRiskLevel) {
-            const sl = reqRiskLevel.toLowerCase();
-            finalHotspots = hotspots.filter(h => {
-                const hl = h.risk_level.toLowerCase();
-                if (sl === 'low') return hl === 'low';
-                if (sl === 'medium' || sl === 'moderate') return hl === 'moderate';
-                if (sl === 'high' || sl === 'critical') return hl === 'high' || hl === 'critical';
-                return true;
+        } catch (aiErr) {
+            console.warn("AI Service Hotspots failed, falling back to basic aggregation:", aiErr.message);
+            // Fallback to basic aggregation if AI service is down
+            const totalViolations = await Violation.countDocuments(filter);
+            if (totalViolations === 0) return res.json({ hotspots: [] });
+
+            const hotspotsAgg = await Violation.aggregate([
+                { $match: filter },
+                { $group: { _id: "$police_station", count: { $sum: 1 }, lat: { $avg: "$latitude" }, lng: { $avg: "$longitude" } } }
+            ]);
+
+            const hotspots = [];
+            let idCounter = 1;
+            hotspotsAgg.forEach(group => {
+                if (group.count >= 5) {
+                    const percentage = (group.count / totalViolations) * 100;
+                    let risk_level = 'Low';
+                    if (percentage >= 15) risk_level = 'Critical';
+                    else if (percentage >= 8) risk_level = 'High';
+                    else if (percentage >= 3) risk_level = 'Moderate';
+
+                    hotspots.push({
+                        id: idCounter++,
+                        lat: group.lat,
+                        lng: group.lng,
+                        count: group.count,
+                        area: group._id || 'Unknown',
+                        risk_level,
+                        risk_score: Math.min(100, Math.max(10, Math.floor(percentage * 4)))
+                    });
+                }
             });
-        }
 
-        finalHotspots.sort((a, b) => b.count - a.count);
-        res.json({ hotspots: finalHotspots });
+            let finalHotspots = hotspots;
+            const reqRiskLevel = req.query.riskLevel;
+            if (reqRiskLevel) {
+                const sl = reqRiskLevel.toLowerCase();
+                finalHotspots = hotspots.filter(h => {
+                    const hl = h.risk_level.toLowerCase();
+                    if (sl === 'low') return hl === 'low';
+                    if (sl === 'medium' || sl === 'moderate') return hl === 'moderate';
+                    if (sl === 'high' || sl === 'critical') return hl === 'high' || hl === 'critical';
+                    return true;
+                });
+            }
+
+            finalHotspots.sort((a, b) => b.count - a.count);
+            return res.json({ hotspots: finalHotspots });
+        }
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -641,68 +718,102 @@ app.post('/api/predict', async (req, res) => {
         const targetHour = hour !== undefined && hour !== null ? parseInt(hour) : 12;
         const targetDay  = dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1;
 
-        const [overallHotspots, targetLocStats] = await Promise.all([
-            Violation.aggregate([
-                { $match: { vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
-                { $group: { _id: "$police_station", count: { $sum: 1 } } }
-            ]),
-            Violation.aggregate([
-                { $match: { police_station: { $regex: new RegExp(`^${targetLoc}$`, 'i') }, vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
-                { $project: { hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } }, day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } } } },
-                { $group: { _id: { hour: "$hour", day_of_week: "$day_of_week" }, count: { $sum: 1 } } }
-            ])
-        ]);
+        try {
+            // Fetch history data for AI service
+            const historyAgg = await Violation.aggregate([
+                { $project: {
+                    location: "$police_station",
+                    vehicle_type: "$vehicle_type",
+                    hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
+                    day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
+                }},
+                { $group: {
+                    _id: { location: "$location", vehicle_type: "$vehicle_type", hour: "$hour", day_of_week: "$day_of_week" },
+                    count: { $sum: 1 }
+                }}
+            ]);
+            
+            const history = historyAgg.map(h => ({
+                location: h._id.location || 'Unknown',
+                vehicle_type: h._id.vehicle_type || 'Unknown',
+                hour: h._id.hour,
+                day_of_week: h._id.day_of_week - 1, // Convert 1-7 (Sun-Sat) to 0-6
+                count: h.count
+            }));
 
-        let totalCount = 0;
-        const futureHotspotsMap = {};
-        overallHotspots.forEach(h => { totalCount += h.count; futureHotspotsMap[h._id || 'Unknown'] = h.count; });
+            const aiRes = await axios.post(`${AI_SERVICE_URL}/api/predict`, {
+                history,
+                target: { location: targetLoc, vehicle_type: targetVeh, hour: targetHour, day_of_week: targetDay }
+            }, { timeout: 60000 });
 
-        const locHourCounts = new Array(24).fill(0);
-        const locDayCounts  = new Array(7).fill(0);
-        targetLocStats.forEach(s => {
-            const h = s._id.hour;
-            const d = s._id.day_of_week - 1;
-            if (h >= 0 && h < 24) locHourCounts[h] += s.count;
-            if (d >= 0 && d < 7)  locDayCounts[d]  += s.count;
-        });
+            return res.json(aiRes.data);
+            
+        } catch (aiErr) {
+            console.warn("AI Service Prediction failed, falling back to simulated prediction:", aiErr.message);
+            // Fallback to basic prediction logic if AI is unreachable
+            const [overallHotspots, targetLocStats] = await Promise.all([
+                Violation.aggregate([
+                    { $match: { vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
+                    { $group: { _id: "$police_station", count: { $sum: 1 } } }
+                ]),
+                Violation.aggregate([
+                    { $match: { police_station: { $regex: new RegExp(`^${targetLoc}$`, 'i') }, vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
+                    { $project: { hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } }, day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } } } },
+                    { $group: { _id: { hour: "$hour", day_of_week: "$day_of_week" }, count: { $sum: 1 } } }
+                ])
+            ]);
 
-        const maxHourCount = Math.max(...locHourCounts, 1);
-        const maxDayCount  = Math.max(...locDayCounts, 1);
+            let totalCount = 0;
+            const futureHotspotsMap = {};
+            overallHotspots.forEach(h => { totalCount += h.count; futureHotspotsMap[h._id || 'Unknown'] = h.count; });
 
-        const hourly_forecast = [];
-        for (let i = 0; i < 24; i++) {
-            const isPeak = (i >= 8 && i <= 10) || (i >= 17 && i <= 19);
-            const historicalWeight = (locHourCounts[i] / maxHourCount) * 50;
-            const syntheticWeight  = isPeak ? 35 : (i >= 22 || i <= 5 ? 5 : 20);
-            let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
-            risk = Math.min(100, Math.max(10, risk));
-            hourly_forecast.push({ hour: `${i.toString().padStart(2, '0')}:00`, risk });
+            const locHourCounts = new Array(24).fill(0);
+            const locDayCounts  = new Array(7).fill(0);
+            targetLocStats.forEach(s => {
+                const h = s._id.hour;
+                const d = s._id.day_of_week - 1;
+                if (h >= 0 && h < 24) locHourCounts[h] += s.count;
+                if (d >= 0 && d < 7)  locDayCounts[d]  += s.count;
+            });
+
+            const maxHourCount = Math.max(...locHourCounts, 1);
+            const maxDayCount  = Math.max(...locDayCounts, 1);
+
+            const hourly_forecast = [];
+            for (let i = 0; i < 24; i++) {
+                const isPeak = (i >= 8 && i <= 10) || (i >= 17 && i <= 19);
+                const historicalWeight = (locHourCounts[i] / maxHourCount) * 50;
+                const syntheticWeight  = isPeak ? 35 : (i >= 22 || i <= 5 ? 5 : 20);
+                let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
+                risk = Math.min(100, Math.max(10, risk));
+                hourly_forecast.push({ hour: `${i.toString().padStart(2, '0')}:00`, risk });
+            }
+
+            const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const weekly_trend = [];
+            for (let i = 0; i < 7; i++) {
+                const isWeekend = i === 0 || i === 6;
+                const historicalWeight = (locDayCounts[i] / maxDayCount) * 60;
+                const syntheticWeight  = isWeekend ? 15 : 35;
+                let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
+                risk = Math.min(100, Math.max(10, risk));
+                weekly_trend.push({ day: DAYS[i], risk });
+            }
+
+            const tomorrowDay  = (targetDay + 1) % 7;
+            const tomorrow_risk   = Math.min(100, Math.max(10, weekly_trend[tomorrowDay].risk + Math.floor(Math.random() * 10) - 5));
+            const next_week_risk  = weekly_trend[targetDay].risk;
+
+            const future_hotspots = Object.keys(futureHotspotsMap)
+                .map(loc => ({
+                    area: loc,
+                    risk: Math.min(100, Math.max(15, Math.round((futureHotspotsMap[loc] / (totalCount || 1)) * 100 * 4 + 20 + Math.random() * 10)))
+                }))
+                .sort((a, b) => b.risk - a.risk)
+                .slice(0, 5);
+
+            return res.json({ tomorrow_risk, next_week_risk, hourly_forecast, weekly_trend, future_hotspots });
         }
-
-        const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        const weekly_trend = [];
-        for (let i = 0; i < 7; i++) {
-            const isWeekend = i === 0 || i === 6;
-            const historicalWeight = (locDayCounts[i] / maxDayCount) * 60;
-            const syntheticWeight  = isWeekend ? 15 : 35;
-            let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
-            risk = Math.min(100, Math.max(10, risk));
-            weekly_trend.push({ day: DAYS[i], risk });
-        }
-
-        const tomorrowDay  = (targetDay + 1) % 7;
-        const tomorrow_risk   = Math.min(100, Math.max(10, weekly_trend[tomorrowDay].risk + Math.floor(Math.random() * 10) - 5));
-        const next_week_risk  = weekly_trend[targetDay].risk;
-
-        const future_hotspots = Object.keys(futureHotspotsMap)
-            .map(loc => ({
-                area: loc,
-                risk: Math.min(100, Math.max(15, Math.round((futureHotspotsMap[loc] / (totalCount || 1)) * 100 * 4 + 20 + Math.random() * 10)))
-            }))
-            .sort((a, b) => b.risk - a.risk)
-            .slice(0, 5);
-
-        return res.json({ tomorrow_risk, next_week_risk, hourly_forecast, weekly_trend, future_hotspots });
     } catch (err) {
         console.error("Prediction Error: ", err.message);
         res.status(500).json({ error: err.message });
@@ -747,6 +858,6 @@ app.get('/api/meta', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
