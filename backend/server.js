@@ -213,14 +213,15 @@ app.post('/api/simulate-event', async (req, res) => {
 });
 
 // MongoDB Connection with index creation
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://parkpluse_bhavika:bhavikaparkpluse@cluster0.kwy2wxv.mongodb.net/?appName=Cluster0';
+console.log('MONGO_URI:', process.env.MONGO_URI ? 'FOUND ✅' : 'MISSING ❌ — using hardcoded fallback');
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://parkpluse_bhavika:bhavikaparkpluse@cluster0.kwy2wxv.mongodb.net/parkpulse?appName=Cluster0';
+
 mongoose.connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 10000, // Timeout after 10s instead of hanging indefinitely
+    serverSelectionTimeoutMS: 10000,
 })
     .then(async () => {
         const dbName = mongoose.connection.db.databaseName;
-        console.log(`MongoDB Connected to database: ${dbName}`);
-        console.log(`MongoDB URI: ${MONGO_URI.startsWith('mongodb+srv') ? 'Atlas cluster' : MONGO_URI}`);
+        console.log(`✅ MongoDB connected to database: ${dbName}`);
         systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `MongoDB Connected to database: ${dbName}` });
         try {
             await Violation.collection.createIndex({ police_station: 1 });
@@ -233,8 +234,17 @@ mongoose.connect(MONGO_URI, {
         } catch (indexErr) {
             console.warn('Index creation warning:', indexErr.message);
         }
+
+        // Start server ONLY after DB is confirmed ready
+        const PORT = process.env.PORT || 3000;
+        server.listen(PORT, () => {
+            console.log(`🚀 Server running on port ${PORT}`);
+        });
     })
-    .catch(err => console.log('MongoDB Connection Error: ', err));
+    .catch(err => {
+        console.error('❌ MongoDB connection error:', err.message);
+        process.exit(1); // Crash fast so Render can restart and retry
+    });
 
 // Helper to drop collection and recreate indexes to reclaim Atlas storage space
 async function clearAndReclaimDB() {
@@ -895,7 +905,3 @@ app.get('/api/meta', async (req, res) => {
     }
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
