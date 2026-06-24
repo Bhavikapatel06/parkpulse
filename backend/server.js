@@ -213,7 +213,7 @@ app.post('/api/simulate-event', async (req, res) => {
 });
 
 // MongoDB Connection with index creation
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://bhavikapatel4298_db_user:bhavikaparkpluse@cluster0.5a0szq8.mongodb.net/parkpulse?appName=Cluster0';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://bhavikapatel4298_db_user:bhavikaparkpluse@ac-g0aegda-shard-00-00.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-01.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-02.5a0szq8.mongodb.net:27017/parkpulse?ssl=true&replicaSet=atlas-eb8704-shard-0&authSource=admin&appName=Cluster0';
 mongoose.connect(MONGO_URI)
     .then(async () => {
         const dbName = mongoose.connection.db.databaseName;
@@ -594,7 +594,10 @@ app.get('/api/dashboard', async (req, res) => {
 app.get('/api/heatmap', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
-        const violations = await Violation.find(filter, 'latitude longitude validation_status').lean();
+        const violations = await Violation.find(filter, 'latitude longitude validation_status')
+            .sort({ created_datetime: -1 })
+            .limit(15000)
+            .lean();
         res.json(violations);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -608,7 +611,10 @@ app.get('/api/hotspots', async (req, res) => {
 
         // Try calling the Python AI Service first for advanced DBSCAN clustering
         try {
-            const locations = await Violation.find(filter, 'latitude longitude police_station').lean();
+            const locations = await Violation.find(filter, 'latitude longitude police_station')
+                .sort({ created_datetime: -1 })
+                .limit(15000)
+                .lean();
             const locationsData = locations.map(l => ({ lat: l.latitude, lng: l.longitude, area: l.police_station || 'Unknown' }));
             
             const aiRes = await axios.post(`${AI_SERVICE_URL}/api/hotspots`, { locations: locationsData }, { timeout: 30000 });
@@ -857,14 +863,14 @@ app.get('/api/export/csv', async (req, res) => {
 app.get('/api/meta', async (req, res) => {
     try {
         const [policeStations, vehicleTypes, violationTypes] = await Promise.all([
-            Violation.distinct('police_station'),
-            Violation.distinct('vehicle_type'),
-            Violation.distinct('violation_type')
+            Violation.aggregate([{ $group: { _id: "$police_station" } }]),
+            Violation.aggregate([{ $group: { _id: "$vehicle_type" } }]),
+            Violation.aggregate([{ $group: { _id: "$violation_type" } }])
         ]);
         res.json({
-            policeStations: policeStations.filter(Boolean),
-            vehicleTypes:   vehicleTypes.filter(Boolean),
-            violationTypes: violationTypes.filter(Boolean)
+            policeStations: policeStations.map(p => p._id).filter(Boolean),
+            vehicleTypes:   vehicleTypes.map(v => v._id).filter(Boolean),
+            violationTypes: violationTypes.map(v => v._id).filter(Boolean)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
