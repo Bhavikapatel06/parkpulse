@@ -15,12 +15,9 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: [
-            process.env.FRONTEND_URL,
-            'https://parkpulse-smoky.vercel.app',
-            'http://localhost:5173',
-            'http://localhost:3000',
-        ].filter(Boolean),
+        origin: (origin, callback) => {
+            callback(null, origin || '*');
+        },
         methods: ["GET", "POST", "PUT", "DELETE"],
         credentials: true
     }
@@ -36,14 +33,8 @@ const ALLOWED_ORIGINS = [
 
 app.use(cors({
     origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. curl, Postman, server-to-server)
-        if (!origin) return callback(null, true);
-        if (ALLOWED_ORIGINS.includes(origin) || process.env.FRONTEND_URL === '*') {
-            callback(null, true);
-        } else {
-            console.warn(`CORS blocked origin: ${origin}`);
-            callback(new Error(`CORS policy: origin ${origin} not allowed`));
-        }
+        // Dynamically allow any origin to completely avoid CORS issues while supporting credentials
+        callback(null, origin || '*');
     },
     credentials: true
 }));
@@ -54,6 +45,7 @@ app.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
+    res.setHeader('X-Debug-Version', '1.0.1');
     next();
 });
 
