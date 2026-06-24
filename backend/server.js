@@ -213,7 +213,7 @@ app.post('/api/simulate-event', async (req, res) => {
 });
 
 // MongoDB Connection with index creation
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://bhavikapatel4298_db_user:bhavikaparkpluse@cluster0.5a0szq8.mongodb.net/parkpulse?appName=Cluster0';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://bhavikapatel4298_db_user:bhavikaparkpluse@ac-g0aegda-shard-00-00.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-01.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-02.5a0szq8.mongodb.net:27017/parkpulse?ssl=true&replicaSet=atlas-eb8704-shard-0&authSource=admin';
 mongoose.connect(MONGO_URI)
     .then(async () => {
         const dbName = mongoose.connection.db.databaseName;
