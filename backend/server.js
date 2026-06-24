@@ -190,14 +190,14 @@ app.post('/api/simulate-event', async (req, res) => {
 
         for (let i = 0; i < n; i++) {
             docs.push({
-                latitude:  latitude  != null ? parseFloat(latitude)  : BASE_LAT + (Math.random() - 0.5) * 0.3,
+                latitude: latitude != null ? parseFloat(latitude) : BASE_LAT + (Math.random() - 0.5) * 0.3,
                 longitude: longitude != null ? parseFloat(longitude) : BASE_LNG + (Math.random() - 0.5) * 0.3,
-                vehicle_type:      (vehicle_type  || VEHICLES[Math.floor(Math.random() * VEHICLES.length)]).toString().toUpperCase(),
-                violation_type:     violation_type || VIOLATIONS[Math.floor(Math.random() * VIOLATIONS.length)],
-                created_datetime:   new Date(),
-                police_station:     police_station || STATIONS[Math.floor(Math.random() * STATIONS.length)],
-                junction_name:      'Simulated Junction',
-                validation_status:  validation_status || STATUSES[Math.floor(Math.random() * STATUSES.length)]
+                vehicle_type: (vehicle_type || VEHICLES[Math.floor(Math.random() * VEHICLES.length)]).toString().toUpperCase(),
+                violation_type: violation_type || VIOLATIONS[Math.floor(Math.random() * VIOLATIONS.length)],
+                created_datetime: new Date(),
+                police_station: police_station || STATIONS[Math.floor(Math.random() * STATIONS.length)],
+                junction_name: 'Simulated Junction',
+                validation_status: validation_status || STATUSES[Math.floor(Math.random() * STATUSES.length)]
             });
         }
 
@@ -213,8 +213,10 @@ app.post('/api/simulate-event', async (req, res) => {
 });
 
 // MongoDB Connection with index creation
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://bhavikapatel4298_db_user:bhavikaparkpluse@ac-g0aegda-shard-00-00.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-01.5a0szq8.mongodb.net:27017,ac-g0aegda-shard-00-02.5a0szq8.mongodb.net:27017/parkpulse?ssl=true&replicaSet=atlas-eb8704-shard-0&authSource=admin';
-mongoose.connect(MONGO_URI)
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://parkpluse_bhavika:bhavikaparkpluse@cluster0.kwy2wxv.mongodb.net/?appName=Cluster0';
+mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 10000, // Timeout after 10s instead of hanging indefinitely
+})
     .then(async () => {
         const dbName = mongoose.connection.db.databaseName;
         console.log(`MongoDB Connected to database: ${dbName}`);
@@ -314,11 +316,19 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
     (async () => {
         try {
             if (isExcel) {
-                // Excel path
-                const workbook = xlsx.readFile(filePath);
+                // Excel path - optimized options to prevent high memory usage and crashes
+                const workbook = xlsx.readFile(filePath, {
+                    cellHTML: false,
+                    cellFormula: false,
+                    cellStyles: false,
+                    cellNF: false,
+                    cellDates: true,
+                    bookVBA: false,
+                    type: 'file'
+                });
                 const sheetName = workbook.SheetNames[0];
                 const worksheet = workbook.Sheets[sheetName];
-                const dataRows = xlsx.utils.sheet_to_json(worksheet);
+                const dataRows = xlsx.utils.sheet_to_json(worksheet, { range: 0 });
 
                 if (sessionId) uploadSessions.get(sessionId).total = dataRows.length;
 
@@ -327,14 +337,14 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                 for (const data of dataRows) {
                     if (!headerMapping) {
                         headerMapping = {
-                            latKey:     findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
-                            lngKey:     findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
-                            statusKey:  findMatchingKey(data, ['validation_status', 'status', 'validation']),
-                            typeKey:    findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
+                            latKey: findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
+                            lngKey: findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
+                            statusKey: findMatchingKey(data, ['validation_status', 'status', 'validation']),
+                            typeKey: findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
                             vehicleKey: findMatchingKey(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']),
-                            dateKey:    findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
+                            dateKey: findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
                             stationKey: findMatchingKey(data, ['police_station', 'station', 'area', 'location', 'police']),
-                            junctionKey:findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
+                            junctionKey: findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
                         };
                     }
 
@@ -342,7 +352,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                     const lngStr = headerMapping.lngKey ? data[headerMapping.lngKey] : '';
                     if (!latStr || !lngStr) continue;
 
-                    const latitude  = parseFloat(latStr);
+                    const latitude = parseFloat(latStr);
                     const longitude = parseFloat(lngStr);
                     if (isNaN(latitude) || isNaN(longitude)) continue;
 
@@ -356,17 +366,17 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 
                     let v_type = (headerMapping.typeKey ? data[headerMapping.typeKey] : '') || 'Unknown';
                     if (typeof v_type === 'string' && v_type.startsWith('[')) {
-                        try { v_type = JSON.parse(v_type)[0] || 'Unknown'; } catch (_) {}
+                        try { v_type = JSON.parse(v_type)[0] || 'Unknown'; } catch (_) { }
                     }
 
                     results.push({
                         latitude,
                         longitude,
-                        vehicle_type:      String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase(),
-                        violation_type:    String(v_type),
-                        created_datetime:  (() => { if (!headerMapping.dateKey || !data[headerMapping.dateKey]) return new Date(); const d = new Date(data[headerMapping.dateKey]); return isNaN(d.getTime()) ? new Date() : d; })(),
-                        police_station:    String((headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown'),
-                        junction_name:     String((headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown'),
+                        vehicle_type: String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase(),
+                        violation_type: String(v_type),
+                        created_datetime: (() => { if (!headerMapping.dateKey || !data[headerMapping.dateKey]) return new Date(); const d = new Date(data[headerMapping.dateKey]); return isNaN(d.getTime()) ? new Date() : d; })(),
+                        police_station: String((headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown'),
+                        junction_name: String((headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown'),
                         validation_status: v_status
                     });
                 }
@@ -410,14 +420,14 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                 for await (const data of parser) {
                     if (!headerMapping) {
                         headerMapping = {
-                            latKey:     findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
-                            lngKey:     findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
-                            statusKey:  findMatchingKey(data, ['validation_status', 'status', 'validation']),
-                            typeKey:    findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
+                            latKey: findMatchingKey(data, ['latitude', 'lat', 'lat_deg', 'y']),
+                            lngKey: findMatchingKey(data, ['longitude', 'lng', 'lon', 'lon_deg', 'x']),
+                            statusKey: findMatchingKey(data, ['validation_status', 'status', 'validation']),
+                            typeKey: findMatchingKey(data, ['violation_type', 'violation', 'offence_type', 'offence']),
                             vehicleKey: findMatchingKey(data, ['vehicle_type', 'vehicle', 'vehicle_category', 'type']),
-                            dateKey:    findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
+                            dateKey: findMatchingKey(data, ['created_datetime', 'date', 'time', 'datetime', 'timestamp']),
                             stationKey: findMatchingKey(data, ['police_station', 'station', 'area', 'location', 'police']),
-                            junctionKey:findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
+                            junctionKey: findMatchingKey(data, ['junction_name', 'junction', 'crossroad'])
                         };
                     }
 
@@ -425,7 +435,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
                     const lngStr = headerMapping.lngKey ? data[headerMapping.lngKey] : '';
                     if (!latStr || !lngStr) continue;
 
-                    const latitude  = parseFloat(latStr);
+                    const latitude = parseFloat(latStr);
                     const longitude = parseFloat(lngStr);
                     if (isNaN(latitude) || isNaN(longitude)) continue;
 
@@ -439,17 +449,17 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 
                     let v_type = (headerMapping.typeKey ? data[headerMapping.typeKey] : '') || 'Unknown';
                     if (typeof v_type === 'string' && v_type.startsWith('[')) {
-                        try { v_type = JSON.parse(v_type)[0] || 'Unknown'; } catch (_) {}
+                        try { v_type = JSON.parse(v_type)[0] || 'Unknown'; } catch (_) { }
                     }
 
                     currentBatch.push({
                         latitude,
                         longitude,
-                        vehicle_type:      String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase(),
-                        violation_type:    String(v_type),
-                        created_datetime:  (() => { if (!headerMapping.dateKey || !data[headerMapping.dateKey]) return new Date(); const d = new Date(data[headerMapping.dateKey]); return isNaN(d.getTime()) ? new Date() : d; })(),
-                        police_station:    String((headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown'),
-                        junction_name:     String((headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown'),
+                        vehicle_type: String((headerMapping.vehicleKey ? data[headerMapping.vehicleKey] : '') || 'Unknown').trim().toUpperCase(),
+                        violation_type: String(v_type),
+                        created_datetime: (() => { if (!headerMapping.dateKey || !data[headerMapping.dateKey]) return new Date(); const d = new Date(data[headerMapping.dateKey]); return isNaN(d.getTime()) ? new Date() : d; })(),
+                        police_station: String((headerMapping.stationKey ? data[headerMapping.stationKey] : '') || 'Unknown'),
+                        junction_name: String((headerMapping.junctionKey ? data[headerMapping.junctionKey] : '') || 'Unknown'),
                         validation_status: v_status
                     });
                     totalCount++;
@@ -494,7 +504,7 @@ app.get('/api/violations', async (req, res) => {
         const skip = (page - 1) * limit;
 
         const filter = buildFilterQuery(req);
-        
+
         if (search) {
             filter.$or = [
                 { police_station: { $regex: search, $options: 'i' } },
@@ -530,24 +540,24 @@ app.get('/api/dashboard', async (req, res) => {
             { $match: filter },
             {
                 $facet: {
-                    byStatus:  [{ $group: { _id: '$validation_status', count: { $sum: 1 } } }],
+                    byStatus: [{ $group: { _id: '$validation_status', count: { $sum: 1 } } }],
                     byStation: [{ $group: { _id: '$police_station', count: { $sum: 1 } } }, { $sort: { count: -1 } }],
-                    total:     [{ $count: 'count' }]
+                    total: [{ $count: 'count' }]
                 }
             }
         ]);
 
-        const result   = statsAgg[0] || { byStatus: [], byStation: [], total: [] };
-        const byStatus  = result.byStatus || [];
+        const result = statsAgg[0] || { byStatus: [], byStation: [], total: [] };
+        const byStatus = result.byStatus || [];
         const byStation = result.byStation || [];
-        const total     = result.total[0]?.count ?? 0;
+        const total = result.total[0]?.count ?? 0;
 
         let approved = 0, rejected = 0, pending = 0;
         byStatus.forEach(({ _id, count }) => {
             const id = (_id || '').trim().toLowerCase();
-            if (id === 'approved')      approved += (count || 0);
+            if (id === 'approved') approved += (count || 0);
             else if (id === 'rejected') rejected += (count || 0);
-            else if (id === 'pending')  pending  += (count || 0);
+            else if (id === 'pending') pending += (count || 0);
         });
 
         const highestRiskArea = byStation.length > 0 && byStation[0]._id ? byStation[0]._id : 'Unknown';
@@ -594,7 +604,10 @@ app.get('/api/dashboard', async (req, res) => {
 app.get('/api/heatmap', async (req, res) => {
     try {
         const filter = buildFilterQuery(req);
-        const violations = await Violation.find(filter, 'latitude longitude validation_status').lean();
+        const violations = await Violation.find(filter, 'latitude longitude validation_status')
+            .sort({ created_datetime: -1 })
+            .limit(15000)
+            .lean();
         res.json(violations);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -608,9 +621,12 @@ app.get('/api/hotspots', async (req, res) => {
 
         // Try calling the Python AI Service first for advanced DBSCAN clustering
         try {
-            const locations = await Violation.find(filter, 'latitude longitude police_station').lean();
+            const locations = await Violation.find(filter, 'latitude longitude police_station')
+                .sort({ created_datetime: -1 })
+                .limit(15000)
+                .lean();
             const locationsData = locations.map(l => ({ lat: l.latitude, lng: l.longitude, area: l.police_station || 'Unknown' }));
-            
+
             const aiRes = await axios.post(`${AI_SERVICE_URL}/api/hotspots`, { locations: locationsData }, { timeout: 30000 });
             let finalHotspots = aiRes.data.hotspots || [];
 
@@ -730,23 +746,24 @@ app.post('/api/predict', async (req, res) => {
         const targetLoc = location || 'Unknown';
         const targetVeh = vehicleType || 'Unknown';
         const targetHour = hour !== undefined && hour !== null ? parseInt(hour) : 12;
-        const targetDay  = dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1;
+        const targetDay = dayOfWeek !== undefined && dayOfWeek !== null ? parseInt(dayOfWeek) : 1;
 
         try {
-            // Fetch history data for AI service
+            // Fetch history data for AI service - optimized direct group stage to avoid massive memory projection
             const historyAgg = await Violation.aggregate([
-                { $project: {
-                    location: "$police_station",
-                    vehicle_type: "$vehicle_type",
-                    hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
-                    day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
-                }},
-                { $group: {
-                    _id: { location: "$location", vehicle_type: "$vehicle_type", hour: "$hour", day_of_week: "$day_of_week" },
-                    count: { $sum: 1 }
-                }}
+                {
+                    $group: {
+                        _id: {
+                            location: "$police_station",
+                            vehicle_type: "$vehicle_type",
+                            hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
+                            day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
+                        },
+                        count: { $sum: 1 }
+                    }
+                }
             ]);
-            
+
             const history = historyAgg.map(h => ({
                 location: h._id.location || 'Unknown',
                 vehicle_type: h._id.vehicle_type || 'Unknown',
@@ -761,7 +778,7 @@ app.post('/api/predict', async (req, res) => {
             }, { timeout: 60000 });
 
             return res.json(aiRes.data);
-            
+
         } catch (aiErr) {
             console.warn("AI Service Prediction failed, falling back to simulated prediction:", aiErr.message);
             // Fallback to basic prediction logic if AI is unreachable
@@ -772,8 +789,15 @@ app.post('/api/predict', async (req, res) => {
                 ]),
                 Violation.aggregate([
                     { $match: { police_station: { $regex: new RegExp(`^${targetLoc}$`, 'i') }, vehicle_type: { $regex: new RegExp(`^${targetVeh}$`, 'i') } } },
-                    { $project: { hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } }, day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } } } },
-                    { $group: { _id: { hour: "$hour", day_of_week: "$day_of_week" }, count: { $sum: 1 } } }
+                    {
+                        $group: {
+                            _id: {
+                                hour: { $hour: { date: "$created_datetime", timezone: "Asia/Kolkata" } },
+                                day_of_week: { $dayOfWeek: { date: "$created_datetime", timezone: "Asia/Kolkata" } }
+                            },
+                            count: { $sum: 1 }
+                        }
+                    }
                 ])
             ]);
 
@@ -782,22 +806,22 @@ app.post('/api/predict', async (req, res) => {
             overallHotspots.forEach(h => { totalCount += h.count; futureHotspotsMap[h._id || 'Unknown'] = h.count; });
 
             const locHourCounts = new Array(24).fill(0);
-            const locDayCounts  = new Array(7).fill(0);
+            const locDayCounts = new Array(7).fill(0);
             targetLocStats.forEach(s => {
                 const h = s._id.hour;
                 const d = s._id.day_of_week - 1;
                 if (h >= 0 && h < 24) locHourCounts[h] += s.count;
-                if (d >= 0 && d < 7)  locDayCounts[d]  += s.count;
+                if (d >= 0 && d < 7) locDayCounts[d] += s.count;
             });
 
             const maxHourCount = Math.max(...locHourCounts, 1);
-            const maxDayCount  = Math.max(...locDayCounts, 1);
+            const maxDayCount = Math.max(...locDayCounts, 1);
 
             const hourly_forecast = [];
             for (let i = 0; i < 24; i++) {
                 const isPeak = (i >= 8 && i <= 10) || (i >= 17 && i <= 19);
                 const historicalWeight = (locHourCounts[i] / maxHourCount) * 50;
-                const syntheticWeight  = isPeak ? 35 : (i >= 22 || i <= 5 ? 5 : 20);
+                const syntheticWeight = isPeak ? 35 : (i >= 22 || i <= 5 ? 5 : 20);
                 let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
                 risk = Math.min(100, Math.max(10, risk));
                 hourly_forecast.push({ hour: `${i.toString().padStart(2, '0')}:00`, risk });
@@ -808,15 +832,15 @@ app.post('/api/predict', async (req, res) => {
             for (let i = 0; i < 7; i++) {
                 const isWeekend = i === 0 || i === 6;
                 const historicalWeight = (locDayCounts[i] / maxDayCount) * 60;
-                const syntheticWeight  = isWeekend ? 15 : 35;
+                const syntheticWeight = isWeekend ? 15 : 35;
                 let risk = Math.round(historicalWeight + syntheticWeight + (Math.random() * 5));
                 risk = Math.min(100, Math.max(10, risk));
                 weekly_trend.push({ day: DAYS[i], risk });
             }
 
-            const tomorrowDay  = (targetDay + 1) % 7;
-            const tomorrow_risk   = Math.min(100, Math.max(10, weekly_trend[tomorrowDay].risk + Math.floor(Math.random() * 10) - 5));
-            const next_week_risk  = weekly_trend[targetDay].risk;
+            const tomorrowDay = (targetDay + 1) % 7;
+            const tomorrow_risk = Math.min(100, Math.max(10, weekly_trend[tomorrowDay].risk + Math.floor(Math.random() * 10) - 5));
+            const next_week_risk = weekly_trend[targetDay].risk;
 
             const future_hotspots = Object.keys(futureHotspotsMap)
                 .map(loc => ({
@@ -843,7 +867,7 @@ app.get('/api/export/csv', async (req, res) => {
         res.write('id,latitude,longitude,vehicle_type,violation_type,created_datetime,police_station,junction_name,validation_status\n');
         const cursor = Violation.find(filter).lean().cursor();
         for await (const v of cursor) {
-            const row = `${v._id},${v.latitude},${v.longitude},"${(v.vehicle_type||'Unknown').replace(/"/g,'""')}","${(v.violation_type||'Unknown').replace(/"/g,'""')}",${v.created_datetime?v.created_datetime.toISOString():''},"${(v.police_station||'Unknown').replace(/"/g,'""')}","${(v.junction_name||'Unknown').replace(/"/g,'""')}","${v.validation_status||'Pending'}"\n`;
+            const row = `${v._id},${v.latitude},${v.longitude},"${(v.vehicle_type || 'Unknown').replace(/"/g, '""')}","${(v.violation_type || 'Unknown').replace(/"/g, '""')}",${v.created_datetime ? v.created_datetime.toISOString() : ''},"${(v.police_station || 'Unknown').replace(/"/g, '""')}","${(v.junction_name || 'Unknown').replace(/"/g, '""')}","${v.validation_status || 'Pending'}"\n`;
             res.write(row);
         }
         res.end();
@@ -857,14 +881,14 @@ app.get('/api/export/csv', async (req, res) => {
 app.get('/api/meta', async (req, res) => {
     try {
         const [policeStations, vehicleTypes, violationTypes] = await Promise.all([
-            Violation.distinct('police_station'),
-            Violation.distinct('vehicle_type'),
-            Violation.distinct('violation_type')
+            Violation.aggregate([{ $group: { _id: "$police_station" } }]),
+            Violation.aggregate([{ $group: { _id: "$vehicle_type" } }]),
+            Violation.aggregate([{ $group: { _id: "$violation_type" } }])
         ]);
         res.json({
-            policeStations: policeStations.filter(Boolean),
-            vehicleTypes:   vehicleTypes.filter(Boolean),
-            violationTypes: violationTypes.filter(Boolean)
+            policeStations: policeStations.map(p => p._id).filter(Boolean),
+            vehicleTypes: vehicleTypes.map(v => v._id).filter(Boolean),
+            violationTypes: violationTypes.map(v => v._id).filter(Boolean)
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
