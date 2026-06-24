@@ -213,10 +213,12 @@ app.post('/api/simulate-event', async (req, res) => {
 });
 
 // MongoDB Connection with index creation
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/parkpulse')
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://bhavikapatel4298_db_user:bhavikaparkpluse@cluster0.5a0szq8.mongodb.net/parkpulse?appName=Cluster0';
+mongoose.connect(MONGO_URI)
     .then(async () => {
         const dbName = mongoose.connection.db.databaseName;
         console.log(`MongoDB Connected to database: ${dbName}`);
+        console.log(`MongoDB URI: ${MONGO_URI.startsWith('mongodb+srv') ? 'Atlas cluster' : MONGO_URI}`);
         systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `MongoDB Connected to database: ${dbName}` });
         try {
             await Violation.collection.createIndex({ police_station: 1 });
