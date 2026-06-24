@@ -58,9 +58,11 @@ export default function Upload({ onUploadSuccess }) {
     fetchViolations(page, search);
 
     // Setup Socket.IO
-    // Get base URL from api config or default to window location
-    const baseURL = api.defaults.baseURL || import.meta.env.VITE_API_URL || 'http://localhost:3000';
-    socketRef.current = io(baseURL);
+    // Socket.IO must connect DIRECTLY to the backend (not through Vercel proxy)
+    // because Vercel's edge network cannot proxy WebSocket connections.
+    // VITE_API_URL should always point to the Render backend: https://parkipluse-1.onrender.com
+    const socketURL = import.meta.env.VITE_API_URL || api.defaults.baseURL || 'http://localhost:3000';
+    socketRef.current = io(socketURL, { transports: ['websocket', 'polling'] });
 
     socketRef.current.on('data_updated', () => {
       fetchViolations(1, search);
