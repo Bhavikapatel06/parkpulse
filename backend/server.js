@@ -15,16 +15,36 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: process.env.FRONTEND_URL || '*',
+        origin: [
+            process.env.FRONTEND_URL,
+            'https://parkpulse-smoky.vercel.app',
+            'http://localhost:5173',
+            'http://localhost:3000',
+        ].filter(Boolean),
         methods: ["GET", "POST", "PUT", "DELETE"],
         credentials: true
     }
 });
 
-// Allow frontend origin from env; fallback to all origins for local dev
-const allowedOrigin = process.env.FRONTEND_URL || '*';
+// Allow frontend origin(s) from env; fallback to all origins for local dev
+const ALLOWED_ORIGINS = [
+    process.env.FRONTEND_URL,
+    'https://parkpulse-smoky.vercel.app',  // production Vercel frontend
+    'http://localhost:5173',               // Vite local dev
+    'http://localhost:3000',               // alternate local dev
+].filter(Boolean);
+
 app.use(cors({
-    origin: allowedOrigin === '*' ? '*' : [allowedOrigin],
+    origin: (origin, callback) => {
+        // Allow requests with no origin (e.g. curl, Postman, server-to-server)
+        if (!origin) return callback(null, true);
+        if (ALLOWED_ORIGINS.includes(origin) || process.env.FRONTEND_URL === '*') {
+            callback(null, true);
+        } else {
+            console.warn(`CORS blocked origin: ${origin}`);
+            callback(new Error(`CORS policy: origin ${origin} not allowed`));
+        }
+    },
     credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
