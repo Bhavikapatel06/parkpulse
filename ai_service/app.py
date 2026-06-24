@@ -43,13 +43,14 @@ def detect_hotspots():
     if hotspots_df.empty:
         return jsonify({'hotspots': []})
 
-    # Dynamic thresholds based on largest cluster
+    # Dynamic thresholds based on cluster count percentiles
     counts = hotspots_df.groupby('cluster').size()
     max_count = int(counts.max())
 
-    mod_thresh  = max(3,  max_count * 0.30)
-    high_thresh = max(6,  max_count * 0.60)
-    crit_thresh = max(10, max_count * 0.80)
+    # Use percentiles to guarantee a good distribution of colors
+    mod_thresh  = max(3, np.percentile(counts, 50))  # 50th percentile
+    high_thresh = max(6, np.percentile(counts, 75))  # 75th percentile
+    crit_thresh = max(10, np.percentile(counts, 90)) # 90th percentile
 
     hotspots = []
     for cluster_id, group in hotspots_df.groupby('cluster'):

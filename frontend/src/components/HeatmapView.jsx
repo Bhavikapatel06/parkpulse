@@ -31,8 +31,9 @@ function HeatmapLayer({ hotspots }) {
     <>
       {hotspots.map((hs, idx) => {
         let color = '#10b981'; // Green = low
-        if (hs.risk_level === 'Moderate') color = '#f59e0b';
-        if (hs.risk_level === 'High' || hs.risk_level === 'Critical') color = '#ef4444';
+        const rl = (hs.risk_level || '').toLowerCase();
+        if (rl === 'moderate') color = '#f59e0b';
+        if (rl === 'high' || rl === 'critical') color = '#ef4444';
         const radius = Math.min(Math.max(hs.count * 0.0004 + 12, 12), 55);
 
         return (
