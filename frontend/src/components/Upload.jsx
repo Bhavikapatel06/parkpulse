@@ -22,7 +22,7 @@ export default function Upload({ onUploadSuccess }) {
   const [message, setMessage] = useState('');
   const [dragActive, setDragActive] = useState(false);
   const [recordCount, setRecordCount] = useState(null);
-  
+
   // Data view state
   const [viewMode, setViewMode] = useState('loading'); // loading | upload | data
   const [dataRecords, setDataRecords] = useState([]);
@@ -41,7 +41,7 @@ export default function Upload({ onUploadSuccess }) {
       setDataRecords(records);
       setTotalPages(totalPages);
       setPage(currentPage);
-      
+
       if (totalRecords > 0) {
         setViewMode('data');
       } else {
@@ -59,7 +59,7 @@ export default function Upload({ onUploadSuccess }) {
 
     // Setup Socket.IO
     // Socket.IO MUST connect directly to the Render backend — Vercel cannot proxy WebSockets.
-    // Use VITE_BACKEND_URL (set to https://parkipluse-1.onrender.com in Vercel env vars).
+    // Use VITE_BACKEND_URL (set to https://parkpulse-backend.onrender.com in Vercel env vars).
     // This is separate from VITE_API_URL so HTTP calls can safely go through the Vercel proxy.
     const socketURL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
     socketRef.current = io(socketURL, { transports: ['websocket', 'polling'] });
@@ -193,8 +193,8 @@ export default function Upload({ onUploadSuccess }) {
   const barColor = progress < 40
     ? 'from-blue-600 to-blue-400'
     : progress < 80
-    ? 'from-blue-500 to-emerald-400'
-    : 'from-emerald-600 to-emerald-400';
+      ? 'from-blue-500 to-emerald-400'
+      : 'from-emerald-600 to-emerald-400';
 
   if (viewMode === 'loading') {
     return (
@@ -217,12 +217,12 @@ export default function Upload({ onUploadSuccess }) {
             <p className="text-sm text-emerald-500/80">Total Records: {dbTotalRecords.toLocaleString()}</p>
           </div>
           <div className="ml-auto">
-             <button
-               onClick={() => setViewMode('upload')}
-               className="px-4 py-2 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded-lg text-sm font-semibold transition-colors"
-             >
-               Force New Upload
-             </button>
+            <button
+              onClick={() => setViewMode('upload')}
+              className="px-4 py-2 bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded-lg text-sm font-semibold transition-colors"
+            >
+              Force New Upload
+            </button>
           </div>
         </div>
 
@@ -271,11 +271,10 @@ export default function Upload({ onUploadSuccess }) {
                       {record.violation_type || 'Unknown'}
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                        record.validation_status?.toLowerCase() === 'approved' ? 'bg-emerald-500/20 text-emerald-400' :
+                      <span className={`px-2 py-1 rounded text-xs font-semibold ${record.validation_status?.toLowerCase() === 'approved' ? 'bg-emerald-500/20 text-emerald-400' :
                         record.validation_status?.toLowerCase() === 'rejected' ? 'bg-red-500/20 text-red-400' :
-                        'bg-amber-500/20 text-amber-400'
-                      }`}>
+                          'bg-amber-500/20 text-amber-400'
+                        }`}>
                         {record.validation_status || 'Pending'}
                       </span>
                     </td>
@@ -334,13 +333,12 @@ export default function Upload({ onUploadSuccess }) {
 
       <div className="mt-6 space-y-5">
         <div
-          className={`glass-panel p-10 flex flex-col items-center justify-center border-2 border-dashed transition-all cursor-pointer relative rounded-2xl ${
-            dragActive
-              ? 'border-blue-500 bg-blue-500/5 scale-[1.01]'
-              : file
-                ? 'border-blue-500/50 bg-blue-500/5'
-                : 'border-slate-600 hover:border-blue-500/60 hover:bg-slate-800/30'
-          } ${status === 'uploading' ? 'pointer-events-none opacity-70' : ''}`}
+          className={`glass-panel p-10 flex flex-col items-center justify-center border-2 border-dashed transition-all cursor-pointer relative rounded-2xl ${dragActive
+            ? 'border-blue-500 bg-blue-500/5 scale-[1.01]'
+            : file
+              ? 'border-blue-500/50 bg-blue-500/5'
+              : 'border-slate-600 hover:border-blue-500/60 hover:bg-slate-800/30'
+            } ${status === 'uploading' ? 'pointer-events-none opacity-70' : ''}`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
