@@ -1,16 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { 
   Server, 
   Activity, 
   RefreshCw, 
   ShieldCheck, 
-  Radio, 
   CheckCircle2, 
   Loader2, 
   ExternalLink,
-  Wifi,
   Sparkles,
-  Database
+  Clock
 } from 'lucide-react';
 import { getBackendUrl, pingServer } from '../lib/api';
 
@@ -216,6 +214,12 @@ export function ConnectionErrorScreen({ onRetry }) {
   const [isRetrying, setIsRetrying] = useState(false);
   const backendUrl = getBackendUrl();
 
+  const handleRetry = useCallback(() => {
+    setIsRetrying(true);
+    if (onRetry) onRetry();
+    setTimeout(() => setIsRetrying(false), 2000);
+  }, [onRetry]);
+
   // Auto-retry countdown
   useEffect(() => {
     const timer = setInterval(() => {
@@ -229,13 +233,7 @@ export function ConnectionErrorScreen({ onRetry }) {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, []);
-
-  const handleRetry = () => {
-    setIsRetrying(true);
-    if (onRetry) onRetry();
-    setTimeout(() => setIsRetrying(false), 2000);
-  };
+  }, [handleRetry]);
 
   return (
     <div className="flex-1 flex items-center justify-center min-h-[500px] p-4 sm:p-6">
