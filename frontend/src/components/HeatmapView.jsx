@@ -155,9 +155,16 @@ export default function HeatmapView({ filters, uploadKey }) {
         )}
 
         <MapContainer center={center} zoom={12} className="w-full h-full rounded-lg z-0" style={{ minHeight: 280 }}>
+          {/* Base map */}
           <TileLayer
-            url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+            attribution='&copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, DeLorme, NAVTEQ'
+            maxZoom={16}
+          />
+          {/* Place & city names labels layer */}
+          <TileLayer
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+            maxZoom={16}
           />
           <MapAutoFit hotspots={hotspots} />
           <HeatmapLayer hotspots={hotspots} />
