@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Routes, Route, useLocation, Link, useNavigate } from 'react-router-dom';
-import { UploadCloud, Menu, Loader2, Activity, RefreshCw } from 'lucide-react';
+import { UploadCloud, Menu, Activity, RefreshCw } from 'lucide-react';
 import api from './lib/api';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
@@ -12,17 +12,7 @@ import ReportGenerator from './components/ReportGenerator';
 import Upload from './components/Upload';
 import FilterPanel from './components/FilterPanel';
 import AdminPanel from './components/AdminPanel';
-
-function LoadingScreen() {
-  return (
-    <div className="flex-1 flex items-center justify-center min-h-screen">
-      <div className="flex flex-col items-center gap-4">
-        <Loader2 className="w-10 h-10 text-blue-500 animate-spin" />
-        <p className="text-slate-400 text-sm">Connecting to database…</p>
-      </div>
-    </div>
-  );
-}
+import { ConnectionEstablishingScreen, ConnectionErrorScreen } from './components/ConnectionScreen';
 
 function EmptyState({ title }) {
   return (
@@ -42,28 +32,6 @@ function EmptyState({ title }) {
         >
           <UploadCloud className="w-5 h-5" /> Upload Dataset
         </Link>
-      </div>
-    </div>
-  );
-}
-
-function ConnectionErrorScreen({ onRetry }) {
-  return (
-    <div className="flex-1 flex items-center justify-center min-h-[400px] p-6">
-      <div className="glass-panel p-8 flex flex-col items-center justify-center text-center max-w-md border border-slate-700/50 rounded-2xl">
-        <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-6 border border-red-500/20 text-red-500">
-          <Activity className="w-8 h-8 animate-pulse" />
-        </div>
-        <h3 className="text-xl font-bold text-white mb-2">Connection Error</h3>
-        <p className="text-slate-400 text-sm mb-6">
-          Unable to connect to the ParkPulse AI server. Please verify the server is running.
-        </p>
-        <button
-          onClick={onRetry}
-          className="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2.5 px-6 rounded-xl shadow-lg shadow-blue-500/20 transition-all flex items-center gap-2 cursor-pointer"
-        >
-          <RefreshCw className="w-4 h-4" /> Retry Connection
-        </button>
       </div>
     </div>
   );
@@ -204,7 +172,7 @@ function AppContent() {
           {connectionError ? (
             <ConnectionErrorScreen onRetry={fetchMetadata} />
           ) : showLoadingScreen ? (
-            <LoadingScreen />
+            <ConnectionEstablishingScreen onConnected={fetchMetadata} onManualRetry={fetchMetadata} />
           ) : showEmptyState ? (
             <EmptyState title={getPageTitle()} />
           ) : (

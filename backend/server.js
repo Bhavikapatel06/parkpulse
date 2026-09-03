@@ -90,9 +90,19 @@ app.get('/api/upload/status/:sessionId', (req, res) => {
     });
 });
 
+// Health check endpoints for cold-start ping and uptime monitoring
+app.get(['/api/health', '/health'], (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        dbState: mongoose.connection.readyState === 1 ? 'connected' : 'connecting'
+    });
+});
+
 // Simple logging middleware
 app.use((req, res, next) => {
-    if (req.method !== 'OPTIONS' && !req.path.includes('/api/admin/logs') && !req.path.includes('/api/heatmap') && !req.path.includes('/api/admin/recommendation-history') && !req.path.includes('/api/upload/status')) {
+    if (req.method !== 'OPTIONS' && !req.path.includes('/api/admin/logs') && !req.path.includes('/api/heatmap') && !req.path.includes('/api/admin/recommendation-history') && !req.path.includes('/api/upload/status') && !req.path.includes('/health')) {
         systemLogs.unshift({ timestamp: new Date(), level: 'INFO', message: `${req.method} ${req.path} - Processing Request` });
         if (systemLogs.length > 200) systemLogs.length = 200;
     }

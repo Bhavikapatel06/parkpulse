@@ -11,7 +11,7 @@ import axios from 'axios';
  */
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '',
-  timeout: 30000, // 30 second timeout for normal calls
+  timeout: 75000, // 75 second timeout to accommodate Render/cloud free tier cold starts
   headers: {
     'Content-Type': 'application/json',
   },
@@ -27,5 +27,30 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+/**
+ * Ping backend to check if the server is awake and healthy.
+ */
+export async function pingServer(customTimeout = 12000) {
+  const base = import.meta.env.VITE_API_URL || '';
+  try {
+    const res = await axios.get(`${base}/api/health`, { timeout: customTimeout });
+    return res.status === 200;
+  } catch {
+    try {
+      const resMeta = await axios.get(`${base}/api/meta`, { timeout: customTimeout });
+      return resMeta.status === 200;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * Get active configured backend URL
+ */
+export function getBackendUrl() {
+  return import.meta.env.VITE_API_URL || import.meta.env.VITE_BACKEND_URL || '';
+}
 
 export default api;
